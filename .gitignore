@@ -1,0 +1,25 @@
+# Secretos y llaves
+.htpasswd*
+*.key
+*.pem
+*.crt
+.env*
+# Respaldos
+*.bak*
+*.orig
+respaldos/
+*.sql
+*.sql.gz
+*.tar
+*.tar.gz
+*.zip
+# Datos de clientes y pruebas
+*.tsv
+prueba-*.php
+pruebas-uisp/
+verificar-*.php
+consultar_uisp.py
+# Dependencias (se reinstalan con composer)
+vendor/
+# Copias de archivos PHP (index.php.algo)
+*.php.*

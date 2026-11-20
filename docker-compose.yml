@@ -2,7 +2,8 @@ version: "3.8"
 
 services:
   servidor-aviso:
-    image: php:apache
+    build: .
+    image: ubb-comunicaciones-php:latest
     container_name: servidor-aviso
     restart: unless-stopped
     ports:

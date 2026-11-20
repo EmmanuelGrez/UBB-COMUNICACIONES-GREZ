@@ -1,0 +1,4416 @@
+<?php
+
+require_once __DIR__ . '/../vendor/autoload.php';
+
+use RouterOS\Client;
+
+use RouterOS\Query;
+
+session_start();
+
+date_default_timezone_set('America/Mexico_City');
+
+$modulosPermitidos = ['inicio', 'clientes', 'dhcp', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'lab-radius', 'centro-radius', 'radius-dhcp', 'radius-pppoe'];
+$moduloActual = (string) ($_GET['modulo'] ?? 'inicio');
+if (!in_array($moduloActual, $modulosPermitidos, true)) {
+    $moduloActual = 'inicio';
+}
+
+$mikrotikConfig = [
+
+    'host' => getenv('MIKROTIK_HOST') ?: '10.0.1.6',
+
+    'user' => getenv('MIKROTIK_USER') ?: 'api-ubb',
+
+    // La contraseña debe definirse en la variable de entorno MIKROTIK_PASS.
+
+    'pass' => trim((string) (getenv('MIKROTIK_PASS') ?: 'Grez75820')),
+
+    'port' => (int) (getenv('MIKROTIK_PORT') ?: 8728),
+
+    'timeout' => 5,
+
+];
+
+$dbConfig = [
+
+    // Si DB_HOST no se establece, se utiliza el socket local de MariaDB montado en Docker.
+
+    'host' => trim((string) (getenv('DB_HOST') ?: '')),
+
+    'port' => (int) (getenv('DB_PORT') ?: 3306),
+
+    'socket' => getenv('DB_SOCKET') ?: '/var/run/mysqld/mysqld.sock',
+
+    'database' => 'ubb_gestion_planes',
+
+    'user' => getenv('DB_USER') ?: '',
+
+    'pass' => getenv('DB_PASS') ?: '',
+
+];
+
+function escapar($valor): string
+
+{
+
+    return htmlspecialchars((string) $valor, ENT_QUOTES, 'UTF-8');
+
+}
+
+
+function claseEstadoCambio(string $estado): string
+{
+    return match (strtoupper(trim($estado))) {
+        'APLICADO', 'VALIDADO', 'AUTORIZADO', 'CORRECTA' => 'estado-ok',
+        'ERROR', 'RECHAZADO', 'FALLIDA' => 'estado-error',
+        default => 'estado-pendiente',
+    };
+}
+
+function jsonRespuesta(array $datos, int $codigo = 200): never
+
+{
+
+    http_response_code($codigo);
+
+    header('Content-Type: application/json; charset=utf-8');
+
+    echo json_encode($datos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    exit;
+
+}
+
+function obtenerPDO(array $config): PDO
+
+{
+
+    if ($config['user'] === '' || $config['pass'] === '') {
+
+        throw new RuntimeException(
+
+            'Configura DB_USER y DB_PASS para la aplicación PHP.'
+
+        );
+
+    }
+
+    if ($config['host'] !== '') {
+
+        $dsn = 'mysql:host=' . $config['host']
+
+            . ';port=' . $config['port']
+
+            . ';dbname=' . $config['database']
+
+            . ';charset=utf8mb4';
+
+    } else {
+
+        if (!file_exists($config['socket'])) {
+
+            throw new RuntimeException(
+
+                'No se encuentra el socket de MariaDB dentro del contenedor. Monta /run/mysqld en Docker o configura DB_HOST.'
+
+            );
+
+        }
+
+        $dsn = 'mysql:unix_socket=' . $config['socket']
+
+            . ';dbname=' . $config['database']
+
+            . ';charset=utf8mb4';
+
+    }
+
+    return new PDO(
+
+        $dsn,
+
+        $config['user'],
+
+        $config['pass'],
+
+        [
+
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+
+            PDO::ATTR_EMULATE_PREPARES => false,
+
+            PDO::ATTR_TIMEOUT => 5,
+
+        ]
+
+    );
+
+}
+
+
+function obtenerPDOJamileth(): PDO
+{
+    $archivo = '/etc/ubb/jamileth.pass';
+
+    if (!is_readable($archivo)) {
+        throw new RuntimeException('No se puede leer la credencial de Jamileth.');
+    }
+
+    $pass = rtrim((string) file_get_contents($archivo), "\r\n");
+
+    if ($pass === '') {
+        throw new RuntimeException('La credencial de Jamileth está vacía.');
+    }
+
+    return new PDO(
+        'mysql:host=192.168.100.221;port=3306;dbname=ubb_plataforma;charset=utf8mb4',
+        'equipo_ubb',
+        $pass,
+        [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES => false,
+            PDO::ATTR_TIMEOUT => 5,
+        ]
+    );
+}
+
+function crearClienteMikrotik(array $config): Client
+
+{
+
+    if ($config['pass'] === '') {
+
+        throw new RuntimeException(
+
+            'Configura MIKROTIK_PASS en el contenedor; la contraseña no debe quedar dentro de index.php.'
+
+        );
+
+    }
+
+    return new Client($config);
+
+}
+
+function obtenerVelocidad(string $rateLimit): string
+
+{
+
+    $partes = preg_split('/\s+/', trim($rateLimit));
+
+    $velocidad = $partes[0] ?? '';
+
+    return $velocidad !== ''
+
+        ? str_replace('/', ' / ', $velocidad)
+
+        : 'No definida';
+
+}
+
+function formatearDuracionRadius($segundos): string
+{
+    if ($segundos === null || $segundos === '') {
+        return '—';
+    }
+
+    $total = max(0, (int) $segundos);
+    $dias = intdiv($total, 86400);
+    $horas = intdiv($total % 86400, 3600);
+    $minutos = intdiv($total % 3600, 60);
+    $seg = $total % 60;
+
+    if ($dias > 0) {
+        return $dias . ' d ' . $horas . ' h';
+    }
+    if ($horas > 0) {
+        return $horas . ' h ' . $minutos . ' min';
+    }
+    if ($minutos > 0) {
+        return $minutos . ' min ' . $seg . ' s';
+    }
+    return $seg . ' s';
+}
+
+function formatearFechaRadius($fecha): string
+{
+    if ($fecha === null || trim((string) $fecha) === '') {
+        return '—';
+    }
+    $marca = strtotime((string) $fecha);
+    return $marca === false ? '—' : date('d/m/Y H:i:s', $marca);
+}
+
+function separarVelocidades(string $rateLimit): array
+
+{
+
+    $partes = preg_split('/\s+/', trim($rateLimit));
+
+    $velocidades = explode('/', $partes[0] ?? '');
+
+    return [
+
+        'subida' => trim($velocidades[0] ?? ''),
+
+        'bajada' => trim($velocidades[1] ?? ''),
+
+    ];
+
+}
+
+function obtenerNombreComercialPerfil(string $perfil): string
+
+{
+
+    return match (strtolower(trim($perfil))) {
+
+        'pro-pppoe18-20m' => 'Básico',
+
+        'pro-pppoe18-30m' => 'Intermedio',
+
+        'pro-pppoe18-60m' => 'Avanzado',
+
+        default => 'Plan por confirmar',
+
+    };
+
+}
+
+function perfilVisibleParaUsuario(string $perfil): bool
+
+{
+
+    return in_array(
+
+        strtolower(trim($perfil)),
+
+        [
+
+            'pro-pppoe18-20m',
+
+            'pro-pppoe18-30m',
+
+            'pro-pppoe18-60m',
+
+        ],
+
+        true
+
+    );
+
+}
+
+/*
+
+ * Recupera los usuarios PPPoE de clientes_servicios.
+
+ * Incluye registros que todavía no tengan id_servicio.
+
+ * Si existen varios registros para el mismo PPPoE, conserva
+
+ * una relación válida antes que un registro provisional.
+
+ */
+
+
+function obtenerMapaServicios(PDO $pdoJamileth): array
+{
+    $sql = "
+        SELECT
+            s.id_servicio,
+            CONCAT_WS(' ',
+                c.nombre,
+                c.apellido_paterno,
+                c.apellido_materno
+            ) AS nombre_cliente,
+            s.paquete_referencia,
+            s.tecnologia,
+            s.estado AS estado_servicio,
+            i.pppoe_name,
+            i.perfil_pppoe,
+            COALESCE(
+                NULLIF(TRIM(i.remote_address), ''),
+                NULLIF(TRIM(i.ip), ''),
+                ''
+            ) AS ip
+        FROM integracion_winbox i
+        INNER JOIN servicios s
+            ON s.id_servicio = i.id_servicio
+            AND s.id_cliente = i.id_cliente
+        INNER JOIN clientes c
+            ON c.id_cliente = s.id_cliente
+        WHERE i.estado_vinculacion = 'RELACIONADO'
+          AND i.tipo_fuente IN ('PPPOE', 'DHCP_PPPOE')
+          AND i.pppoe_name IS NOT NULL
+          AND TRIM(i.pppoe_name) <> ''
+        ORDER BY
+            CASE WHEN i.tipo_fuente = 'PPPOE' THEN 0 ELSE 1 END,
+            i.id_integracion ASC
+    ";
+
+    $mapa = [];
+    $ambiguos = [];
+
+    foreach ($pdoJamileth->query($sql) as $fila) {
+        $nombrePPPoE = trim((string) ($fila['pppoe_name'] ?? ''));
+
+        if ($nombrePPPoE === '') {
+            continue;
+        }
+
+        $clave = mb_strtolower($nombrePPPoE, 'UTF-8');
+
+        if (isset($ambiguos[$clave])) {
+            continue;
+        }
+
+        $idNuevo = trim((string) ($fila['id_servicio'] ?? ''));
+
+        $registroNuevo = [
+            'id_servicio' => $idNuevo,
+            'nombre_cliente' => (string) ($fila['nombre_cliente'] ?? ''),
+            'paquete_referencia' => (string) ($fila['paquete_referencia'] ?? ''),
+            'tecnologia' => (string) ($fila['tecnologia'] ?? ''),
+            'estado_servicio' => (string) ($fila['estado_servicio'] ?? ''),
+            'perfil_bd' => (string) ($fila['perfil_pppoe'] ?? ''),
+            'ip' => (string) ($fila['ip'] ?? ''),
+        ];
+
+        if (!isset($mapa[$clave])) {
+            $mapa[$clave] = $registroNuevo;
+            continue;
+        }
+
+        $idExistente = trim((string) ($mapa[$clave]['id_servicio'] ?? ''));
+
+        if ($idExistente !== '' && $idNuevo !== '' && $idExistente !== $idNuevo) {
+            unset($mapa[$clave]);
+            $ambiguos[$clave] = true;
+            continue;
+        }
+
+        if ($idExistente === '' && $idNuevo !== '') {
+            $mapa[$clave] = $registroNuevo;
+        }
+    }
+
+    return $mapa;
+}
+
+/**
+ * Devuelve el estado de vinculación de cada cuenta PPPoE según Jamileth.
+ * Solo considera RELACIONADO cuando cliente y servicio existen y pertenecen
+ * entre sí. Deduplica filas idénticas; nunca elige entre pares de IDs distintos.
+ */
+function obtenerMapaEstadoPppoe(PDO $pdoJamileth): array
+{
+    $sql = "
+        SELECT
+            i.pppoe_name,
+            i.tipo_fuente,
+            i.estado_vinculacion,
+            i.id_cliente,
+            i.id_servicio,
+            c.id_cliente AS cliente_existente,
+            s.id_servicio AS servicio_existente,
+            s.id_cliente AS servicio_id_cliente
+        FROM integracion_winbox i
+        LEFT JOIN clientes c
+            ON c.id_cliente = i.id_cliente
+        LEFT JOIN servicios s
+            ON s.id_servicio = i.id_servicio
+           AND s.id_cliente = i.id_cliente
+        WHERE i.tipo_fuente IN ('PPPOE', 'DHCP_PPPOE')
+          AND i.pppoe_name IS NOT NULL
+          AND TRIM(i.pppoe_name) <> ''
+        ORDER BY i.id_integracion
+    ";
+
+    $grupos = [];
+    foreach ($pdoJamileth->query($sql) as $fila) {
+        $nombre = mb_strtolower(trim((string) ($fila['pppoe_name'] ?? '')), 'UTF-8');
+        if ($nombre === '') {
+            continue;
+        }
+        $grupos[$nombre][] = $fila;
+    }
+
+    $mapa = [];
+    foreach ($grupos as $nombre => $filas) {
+        $paresValidos = [];
+        $hayPendiente = false;
+        $hayRelacionadoInvalido = false;
+        $tiposValidos = [];
+
+        foreach ($filas as $fila) {
+            $estado = strtoupper(trim((string) ($fila['estado_vinculacion'] ?? '')));
+            $tipo = strtoupper(trim((string) ($fila['tipo_fuente'] ?? '')));
+            if ($estado === 'PENDIENTE') {
+                $hayPendiente = true;
+            }
+
+            $idCliente = trim((string) ($fila['id_cliente'] ?? ''));
+            $idServicio = trim((string) ($fila['id_servicio'] ?? ''));
+            $valido = $estado === 'RELACIONADO'
+                && $idCliente !== '' && $idCliente !== '0'
+                && $idServicio !== '' && $idServicio !== '0'
+                && !empty($fila['cliente_existente'])
+                && !empty($fila['servicio_existente'])
+                && (string) $fila['servicio_id_cliente'] === $idCliente;
+
+            if ($valido) {
+                $clavePar = $idCliente . '|' . $idServicio;
+                $paresValidos[$clavePar] = $fila;
+                $tiposValidos[$tipo] = true;
+            } elseif ($estado === 'RELACIONADO') {
+                $hayRelacionadoInvalido = true;
+            }
+        }
+
+        if (count($paresValidos) > 1) {
+            $estadoFinal = 'RELACION_AMBIGUA';
+            $filaFinal = null;
+        } elseif (count($paresValidos) === 1) {
+            $filaFinal = reset($paresValidos);
+            $estadoFinal = isset($tiposValidos['PPPOE'])
+                ? 'RELACIONADO'
+                : 'RELACIONADO_DHCP_PPPOE';
+        } elseif ($hayPendiente) {
+            $estadoFinal = 'PENDIENTE';
+            $filaFinal = $filas[0];
+        } elseif ($hayRelacionadoInvalido) {
+            $estadoFinal = 'REVISAR_RELACION';
+            $filaFinal = $filas[0];
+        } else {
+            $estadoFinal = 'SIN_REGISTRO_VALIDO';
+            $filaFinal = $filas[0];
+        }
+
+        $mapa[$nombre] = [
+            'estado' => $estadoFinal,
+            'tipo_fuente' => (string) ($filaFinal['tipo_fuente'] ?? ''),
+            'id_cliente' => $estadoFinal === 'RELACIONADO' || $estadoFinal === 'RELACIONADO_DHCP_PPPOE'
+                ? (string) ($filaFinal['id_cliente'] ?? '') : '',
+            'id_servicio' => $estadoFinal === 'RELACIONADO' || $estadoFinal === 'RELACIONADO_DHCP_PPPOE'
+                ? (string) ($filaFinal['id_servicio'] ?? '') : '',
+        ];
+    }
+
+    return $mapa;
+}
+
+/*
+ * Recupera la integración DHCP desde Jamileth en modo de solo lectura.
+ * La clave técnica es servidor DHCP + MAC; la MAC por sí sola no es única
+ * entre todos los servidores. Solo se considera relacionada una fila cuya
+ * relación servicio-cliente existe realmente en ambas tablas.
+ */
+function obtenerMapaIntegracionDhcp(PDO $pdoJamileth): array
+{
+    $sql = "
+        SELECT
+            i.mac,
+            i.ip,
+            i.hostname,
+            i.servidor_dhcp,
+            i.id_cliente,
+            i.id_servicio,
+            i.estado_vinculacion,
+            s.id_servicio AS servicio_existente,
+            c.id_cliente AS cliente_existente,
+            CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno) AS nombre_cliente,
+            s.tecnologia,
+            s.estado AS estado_servicio
+        FROM integracion_winbox i
+        LEFT JOIN servicios s
+            ON s.id_servicio = i.id_servicio
+            AND s.id_cliente = i.id_cliente
+        LEFT JOIN clientes c
+            ON c.id_cliente = i.id_cliente
+        WHERE i.tipo_fuente = 'DHCP'
+          AND i.mac IS NOT NULL
+          AND TRIM(i.mac) <> ''
+          AND i.servidor_dhcp IS NOT NULL
+          AND TRIM(i.servidor_dhcp) <> ''
+        ORDER BY i.servidor_dhcp, i.mac, i.id_integracion
+    ";
+
+    $mapa = [];
+    $ambiguos = [];
+
+    foreach ($pdoJamileth->query($sql) as $fila) {
+        $servidor = trim((string) ($fila['servidor_dhcp'] ?? ''));
+        $mac = strtoupper(trim((string) ($fila['mac'] ?? '')));
+        if ($servidor === '' || $mac === '') {
+            continue;
+        }
+
+        $clave = strtolower($servidor) . '|' . $mac;
+        if (isset($ambiguos[$clave])) {
+            continue;
+        }
+
+        $idCliente = trim((string) ($fila['id_cliente'] ?? ''));
+        $idServicio = trim((string) ($fila['id_servicio'] ?? ''));
+        $relacionValida = strtoupper((string) ($fila['estado_vinculacion'] ?? '')) === 'RELACIONADO'
+            && $idCliente !== ''
+            && $idServicio !== ''
+            && !empty($fila['cliente_existente'])
+            && !empty($fila['servicio_existente']);
+
+        $registro = [
+            'id_cliente' => $relacionValida ? $idCliente : '',
+            'id_servicio' => $relacionValida ? $idServicio : '',
+            'nombre_cliente' => $relacionValida ? (string) ($fila['nombre_cliente'] ?? '') : '',
+            'tecnologia' => $relacionValida ? (string) ($fila['tecnologia'] ?? '') : '',
+            'estado_servicio' => $relacionValida ? (string) ($fila['estado_servicio'] ?? '') : '',
+            'hostname' => (string) ($fila['hostname'] ?? ''),
+            'ip_registrada' => (string) ($fila['ip'] ?? ''),
+            'estado_integracion' => $relacionValida
+                ? 'RELACIONADO'
+                : (strtoupper((string) ($fila['estado_vinculacion'] ?? '')) === 'PENDIENTE'
+                    ? 'PENDIENTE'
+                    : 'REVISAR RELACIÓN'),
+            'relacion_valida' => $relacionValida,
+        ];
+
+        if (!isset($mapa[$clave])) {
+            $mapa[$clave] = $registro;
+            continue;
+        }
+
+        $existente = $mapa[$clave];
+        $idsDiferentes = $existente['relacion_valida'] && $relacionValida
+            && ($existente['id_cliente'] !== $idCliente || $existente['id_servicio'] !== $idServicio);
+
+        if ($idsDiferentes) {
+            unset($mapa[$clave]);
+            $ambiguos[$clave] = true;
+            continue;
+        }
+
+        if (!$existente['relacion_valida'] && $relacionValida) {
+            $mapa[$clave] = $registro;
+        }
+    }
+
+    foreach ($ambiguos as $clave => $_) {
+        $mapa[$clave] = [
+            'id_cliente' => '',
+            'id_servicio' => '',
+            'nombre_cliente' => '',
+            'tecnologia' => '',
+            'estado_servicio' => '',
+            'hostname' => '',
+            'ip_registrada' => '',
+            'estado_integracion' => 'RELACIÓN AMBIGUA',
+            'relacion_valida' => false,
+        ];
+    }
+
+    return $mapa;
+}
+
+
+/* LABORATORIO RADIUS: aislado de clientes, Jamileth y MikroTik. */
+if ($moduloActual === 'lab-radius') {
+    $usuarioLab = 'PRUEBA-PPPOE-GREZ';
+    $atributoLab = 'Mikrotik-Group';
+
+    $perfilesLab = [
+        'PRUEBA-PPPOE-GREZ' => '20 Mbps simétricos',
+        'PRUEBA-PPPOE-GREZ-10M' => '10 Mbps simétricos',
+    ];
+
+    $csrfLab = $_SESSION['csrf_lab_radius'] ?? '';
+    if (!is_string($csrfLab) || $csrfLab === '') {
+        $csrfLab = bin2hex(random_bytes(32));
+        $_SESSION['csrf_lab_radius'] = $csrfLab;
+    }
+
+    $pdoLab = null;
+    $filaActualLab = null;
+    $errorLab = '';
+    $mensajeLab = '';
+
+    try {
+        $configRadiusLab = $dbConfig;
+        $configRadiusLab['database'] = 'radius';
+        $pdoLab = obtenerPDO($configRadiusLab);
+
+        // Confirma que la cuenta de laboratorio tiene una sola credencial.
+        $consultaCredencialLab = $pdoLab->prepare(
+            "SELECT COUNT(*) FROM radcheck
+             WHERE username = ? AND attribute = 'Cleartext-Password'"
+        );
+        $consultaCredencialLab->execute([$usuarioLab]);
+
+        if ((int) $consultaCredencialLab->fetchColumn() !== 1) {
+            throw new RuntimeException(
+                'La cuenta de laboratorio no tiene exactamente una credencial registrada.'
+            );
+        }
+
+        // Confirma que existe una sola asignación de perfil.
+        $consultaReplyLab = $pdoLab->prepare(
+            "SELECT id, op, value FROM radreply
+             WHERE username = ? AND attribute = ?"
+        );
+        $consultaReplyLab->execute([$usuarioLab, $atributoLab]);
+        $filasReplyLab = $consultaReplyLab->fetchAll();
+
+        if (count($filasReplyLab) !== 1) {
+            throw new RuntimeException(
+                'Se esperaba exactamente una asignación Mikrotik-Group para la cuenta de prueba.'
+            );
+        }
+
+        if ((string) $filasReplyLab[0]['op'] !== ':=') {
+            throw new RuntimeException(
+                'La asignación RADIUS no utiliza el operador esperado. No se realizó ningún cambio.'
+            );
+        }
+
+        $filaActualLab = $filasReplyLab[0];
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            if (!hash_equals(
+                $csrfLab,
+                (string) ($_POST['csrf_lab_radius'] ?? '')
+            )) {
+                throw new RuntimeException(
+                    'La sesión del formulario venció. Recarga la pantalla.'
+                );
+            }
+
+            if (($_POST['accion'] ?? '') !== 'cambiar_perfil_lab') {
+                throw new RuntimeException('Operación no reconocida.');
+            }
+
+            $perfilSolicitadoLab = (string) ($_POST['perfil'] ?? '');
+
+            if (!array_key_exists($perfilSolicitadoLab, $perfilesLab)) {
+                throw new RuntimeException(
+                    'El perfil seleccionado no está autorizado para esta prueba.'
+                );
+            }
+
+            // Bloquea la fila exacta antes de actualizarla.
+            $pdoLab->beginTransaction();
+
+            $bloqueoLab = $pdoLab->prepare(
+                "SELECT id, op, value FROM radreply
+                 WHERE username = ? AND attribute = ?
+                 FOR UPDATE"
+            );
+            $bloqueoLab->execute([$usuarioLab, $atributoLab]);
+            $filasBloqueadasLab = $bloqueoLab->fetchAll();
+
+            if (count($filasBloqueadasLab) !== 1) {
+                throw new RuntimeException(
+                    'La asignación cambió o dejó de ser única. Se canceló la operación.'
+                );
+            }
+
+            $filaBloqueadaLab = $filasBloqueadasLab[0];
+
+            if ((string) $filaBloqueadaLab['op'] !== ':=') {
+                throw new RuntimeException(
+                    'El operador RADIUS no coincide. Se canceló la operación.'
+                );
+            }
+
+            $valorAnteriorLab = (string) $filaBloqueadaLab['value'];
+
+            if ($valorAnteriorLab === $perfilSolicitadoLab) {
+                $pdoLab->commit();
+                $mensajeLab = 'La cuenta ya tenía ese perfil. No fue necesario actualizarla.';
+            } else {
+                $actualizarLab = $pdoLab->prepare(
+                    "UPDATE radreply
+                     SET value = ?
+                     WHERE id = ?
+                       AND username = ?
+                       AND attribute = ?
+                       AND op = ?
+                       AND value = ?"
+                );
+
+                $actualizarLab->execute([
+                    $perfilSolicitadoLab,
+                    $filaBloqueadaLab['id'],
+                    $usuarioLab,
+                    $atributoLab,
+                    ':=',
+                    $valorAnteriorLab,
+                ]);
+
+                if ($actualizarLab->rowCount() !== 1) {
+                    throw new RuntimeException(
+                        'No se actualizó exactamente una fila. Se canceló la operación.'
+                    );
+                }
+
+                $pdoLab->commit();
+                $mensajeLab = 'Perfil RADIUS actualizado. Reconecta la sesión PPPoE de prueba para aplicar el perfil.';
+                $filaActualLab['value'] = $perfilSolicitadoLab;
+            }
+        }
+    } catch (Throwable $e) {
+        if ($pdoLab instanceof PDO && $pdoLab->inTransaction()) {
+            $pdoLab->rollBack();
+        }
+
+        error_log('UBB LAB RADIUS: ' . $e->getMessage());
+
+        $errorLab = $e instanceof PDOException
+            ? 'No se pudo completar la consulta o actualización de RADIUS. Revisa el registro de Apache.'
+            : $e->getMessage();
+    }
+
+    $perfilActualValorLab = (string) ($filaActualLab['value'] ?? '');
+    $perfilActualNombreLab = $perfilesLab[$perfilActualValorLab] ?? 'Perfil no reconocido';
+
+    header('Content-Type: text/html; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    ?>
+    <!doctype html>
+    <html lang="es">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Prueba RADIUS | UBB Comunicaciones</title>
+        <style>
+            body{margin:0;padding:28px;background:#f5f3f8;color:#292333;font-family:Arial,sans-serif}
+            main{max-width:720px;margin:30px auto;background:#fff;padding:28px;border:1px solid #e8e1ef;border-radius:16px}
+            h1{margin-top:0;color:#49366b}
+            .dato,.aviso,.mensaje,.error{padding:14px;margin:14px 0;border-radius:10px;background:#f5f2fa}
+            .mensaje{background:#eaf7ee;color:#185b31}
+            .error{background:#fff0f0;color:#8a2424}
+            label{display:block;margin:18px 0 8px;font-weight:bold}
+            select{width:100%;padding:12px;border:1px solid #cfc5dc;border-radius:8px;font-size:16px}
+            button{margin-top:16px;padding:12px 18px;border:0;border-radius:8px;background:#6945a2;color:#fff;font-weight:bold;cursor:pointer}
+            a{color:#60418e}
+            .nota{font-size:14px;line-height:1.5;color:#5d5666}
+        </style>
+    </head>
+    <body>
+    <main>
+        <a href="?modulo=inicio">← Volver al portal</a>
+        <h1>Prueba aislada de perfiles PPPoE</h1>
+        <p>Este módulo modifica exclusivamente una asignación de la cuenta de laboratorio en RADIUS.</p>
+
+        <div class="dato">
+            <strong>Cuenta:</strong> <?= escapar($usuarioLab) ?><br>
+            <strong>Base:</strong> radius<br>
+            <strong>Atributo:</strong> <?= escapar($atributoLab) ?><br>
+            <strong>Perfil actual:</strong> <?= escapar($perfilActualValorLab ?: 'No disponible') ?><br>
+            <strong>Velocidad del perfil:</strong> <?= escapar($perfilActualNombreLab) ?>
+        </div>
+
+        <?php if ($mensajeLab !== ''): ?>
+            <div class="mensaje"><?= escapar($mensajeLab) ?></div>
+        <?php endif; ?>
+
+        <?php if ($errorLab !== ''): ?>
+            <div class="error"><?= escapar($errorLab) ?></div>
+        <?php endif; ?>
+
+        <?php if ($filaActualLab !== null): ?>
+            <form method="post" action="?modulo=lab-radius">
+                <input type="hidden" name="csrf_lab_radius" value="<?= escapar($csrfLab) ?>">
+                <input type="hidden" name="accion" value="cambiar_perfil_lab">
+
+                <label for="perfil">Selecciona el perfil para la cuenta de prueba:</label>
+                <select name="perfil" id="perfil" required>
+                    <?php foreach ($perfilesLab as $nombrePerfilLab => $descripcionPerfilLab): ?>
+                        <option
+                            value="<?= escapar($nombrePerfilLab) ?>"
+                            <?= $perfilActualValorLab === $nombrePerfilLab ? 'selected' : '' ?>
+                        >
+                            <?= escapar($nombrePerfilLab) ?> — <?= escapar($descripcionPerfilLab) ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+
+                <button type="submit">Guardar perfil de prueba</button>
+            </form>
+        <?php endif; ?>
+
+        <div class="aviso">
+            <strong>Alcance:</strong> solo actualiza el atributo Mikrotik-Group de
+            PRUEBA-PPPOE-GREZ en radius.radreply. No modifica radcheck, clientes,
+            inventario, ubb_plataforma ni configuraciones MikroTik.
+        </div>
+
+        <p class="nota">
+            El nuevo perfil se aplicará cuando la sesión PPPoE de prueba se vuelva a autenticar.
+            Este portal no tiene inicio de sesión individual; cualquier persona que ya pueda
+            abrirlo podría cambiar esta cuenta de laboratorio.
+        </p>
+    </main>
+    </body>
+    </html>
+    <?php
+    exit;
+}
+
+/* CLIENTES DHCP EN RADIUS: alta, suspension y reactivacion (modulo aparte). */
+if ($moduloActual === 'radius-dhcp') {
+    require __DIR__ . '/modulo-radius-dhcp.php';
+    exit;
+}
+
+/* CLIENTES PPPoE EN RADIUS (fase 1: solo consulta). */
+if ($moduloActual === 'radius-pppoe') {
+    require __DIR__ . '/modulo-radius-pppoe.php';
+    exit;
+}
+
+$pdo = null; // Modo consulta: no se abre conexión a inventario ni se escriben avisos.
+$pdoJamileth = null;
+$errorConexion = null;
+$errorBaseDatos = null;
+$errorAvisos = null;
+$clientes = [];
+$perfiles = [];
+$eventos = [];
+$mapaServicios = [];
+$mapaEstadoPppoe = [];
+$jamilethPppoeDisponible = false;
+$mapaInventarioPppoe = [];
+$mapaInventarioServicios = [];
+$inventarioPppoeDisponible = false;
+$errorInventarioPppoe = null;
+$usuariosDuplicadosMikrotik = [];
+$totalConectados = 0;
+$usuariosActivos = [];
+$mapaIntegracionDhcp = [];
+$concesionesDhcp = [];
+$errorIntegracionDhcp = null;
+$errorConsultaDhcp = null;
+$dhcpConRelacion = 0;
+$dhcpPendientes = 0;
+$dhcpBound = 0;
+$dhcpConListaRadius = 0;
+
+try {
+    $pdoJamileth = obtenerPDOJamileth();
+    $mapaServicios = obtenerMapaServicios($pdoJamileth);
+    $mapaEstadoPppoe = obtenerMapaEstadoPppoe($pdoJamileth);
+    $jamilethPppoeDisponible = true;
+} catch (Throwable $e) {
+    error_log('UBB planes: error al consultar Jamileth: ' . $e->getMessage());
+    $errorBaseDatos = 'No se pudo consultar la base de clientes. Verifica el acceso de solo lectura.';
+    $mapaServicios = [];
+}
+
+// Inventario: lectura opcional. No se intenta escribir ni conceder permisos aquí.
+try {
+    $configInventario = $dbConfig;
+    $configInventario['database'] = 'inventario';
+    $pdoInventario = obtenerPDO($configInventario);
+
+    try {
+        foreach ($pdoInventario->query("
+            SELECT name
+            FROM pppoe_secrets
+            WHERE name IS NOT NULL AND TRIM(name) <> ''
+        ") as $filaInventario) {
+            $nombreInventario = mb_strtolower(trim((string) $filaInventario['name']), 'UTF-8');
+            if ($nombreInventario !== '') {
+                $mapaInventarioPppoe[$nombreInventario] = true;
+            }
+        }
+        $inventarioPppoeDisponible = true;
+    } catch (Throwable $e) {
+        error_log('UBB PPPoE: sin permiso de lectura para inventario.pppoe_secrets: ' . $e->getMessage());
+        $errorInventarioPppoe = 'La aplicación todavía no puede consultar inventario.pppoe_secrets; el estado de inventario se marcará como no verificado.';
+    }
+
+    // Esta tabla sí es una referencia de servicios, no sustituye al padrón pppoe_secrets.
+    try {
+        foreach ($pdoInventario->query("
+            SELECT pppoe_name, id_cliente, id_servicio
+            FROM clientes_servicios
+            WHERE pppoe_name IS NOT NULL AND TRIM(pppoe_name) <> ''
+        ") as $filaServicioInventario) {
+            $nombreInventario = mb_strtolower(trim((string) $filaServicioInventario['pppoe_name']), 'UTF-8');
+            if ($nombreInventario !== '') {
+                $mapaInventarioServicios[$nombreInventario] = [
+                    'id_cliente' => (string) ($filaServicioInventario['id_cliente'] ?? ''),
+                    'id_servicio' => (string) ($filaServicioInventario['id_servicio'] ?? ''),
+                ];
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('UBB PPPoE: no se pudo consultar inventario.clientes_servicios: ' . $e->getMessage());
+    }
+} catch (Throwable $e) {
+    $errorInventarioPppoe = 'No hay conexión de lectura con inventario; sus registros no se usarán para clasificar cuentas.';
+    error_log('UBB PPPoE: error de conexión con inventario: ' . $e->getMessage());
+}
+
+// El historial de avisos no se consulta desde inventario en esta versión.
+$errorAvisos = 'Actividad reciente pendiente de integrar con una fuente autorizada.';
+
+
+/* CATALOGO COMERCIAL UBB: SOLO LECTURA */
+
+$pdoCatalogo = null;
+$planesCatalogo = [];
+$velocidadesPorPlan = [];
+$planesPorServicio = [];
+$errorCatalogo = null;
+
+try {
+    $configCatalogo = $dbConfig;
+    $configCatalogo['database'] = 'ubb_gestion_planes';
+
+    $pdoCatalogo = obtenerPDO($configCatalogo);
+
+    $sqlCatalogo = "
+        SELECT
+            p.id_plan,
+            p.nombre_plan,
+            p.precio_mensual,
+            p.estado,
+            v.tecnologia,
+            v.velocidad_mbps,
+            v.velocidad_bajada_mbps,
+            v.velocidad_subida_mbps
+        FROM planes p
+        LEFT JOIN plan_velocidades v
+            ON v.id_plan = p.id_plan
+        WHERE p.estado = 'ACTIVO'
+        ORDER BY p.id_plan,
+            CASE
+                WHEN v.tecnologia = 'INALAMBRICO' THEN 1
+                WHEN v.tecnologia = 'FIBRA' THEN 2
+                ELSE 3
+            END
+    ";
+
+    $filasCatalogo = $pdoCatalogo->query($sqlCatalogo)->fetchAll();
+    $planesAgrupados = [];
+
+    foreach ($filasCatalogo as $fila) {
+        $id = (int) $fila['id_plan'];
+
+        if (!isset($planesAgrupados[$id])) {
+            $planesAgrupados[$id] = [
+                'nombre_plan' => $fila['nombre_plan'],
+                'precio_mensual' => $fila['precio_mensual'],
+                'estado' => $fila['estado'],
+                'velocidades' => [],
+                'velocidades_detalle' => []
+            ];
+        }
+
+        $tecnologia = strtoupper(trim((string) ($fila['tecnologia'] ?? '')));
+
+        if (
+            in_array($tecnologia, ['INALAMBRICO', 'FIBRA'], true)
+            && $fila['velocidad_mbps'] !== null
+        ) {
+            $planesAgrupados[$id]['velocidades'][$tecnologia] =
+                (float) $fila['velocidad_mbps'];
+
+            $planesAgrupados[$id]['velocidades_detalle'][$tecnologia] = [
+                'descarga' => $fila['velocidad_bajada_mbps'] !== null
+                    ? (float) $fila['velocidad_bajada_mbps'] : null,
+                'subida' => $fila['velocidad_subida_mbps'] !== null
+                    ? (float) $fila['velocidad_subida_mbps'] : null,
+            ];
+        }
+    }
+
+    $velocidadesPorPlan = $planesAgrupados;
+    $planesCatalogo = array_values($planesAgrupados);
+
+    $sqlAsignaciones = "
+        SELECT
+            sp.id_servicio,
+            sp.id_plan,
+            sp.estado_asignacion,
+            p.nombre_plan,
+            p.precio_mensual,
+            p.estado AS estado_plan
+        FROM servicios_planes sp
+        INNER JOIN planes p
+            ON p.id_plan = sp.id_plan
+        ORDER BY sp.id_servicio
+    ";
+
+    foreach ($pdoCatalogo->query($sqlAsignaciones) as $fila) {
+        $planesPorServicio[(string) $fila['id_servicio']] = [
+            'id_plan' => (int) $fila['id_plan'],
+            'nombre_plan' => (string) $fila['nombre_plan'],
+            'precio_mensual' => $fila['precio_mensual'],
+            'estado_asignacion' => (string) $fila['estado_asignacion'],
+            'estado_plan' => (string) $fila['estado_plan'],
+        ];
+    }
+
+} catch (Throwable $e) {
+    error_log('UBB planes: error en catálogo comercial: ' . $e->getMessage());
+    $errorCatalogo = 'No fue posible consultar el catálogo comercial.';
+}
+
+
+/* HISTORIAL: CONSULTA DE SOLO LECTURA */
+$historialCambios = [];
+$errorHistorial = null;
+
+if ($moduloActual === 'historial') {
+    try {
+        if (!($pdoCatalogo instanceof PDO)) {
+            throw new RuntimeException('Sin conexión a ubb_gestion_planes');
+        }
+
+        $sqlHistorial = "
+            SELECT h.*,
+                   pa.nombre_plan AS plan_anterior,
+                   pn.nombre_plan AS plan_nuevo,
+                   ppa.nombre_perfil AS perfil_anterior,
+                   ppn.nombre_perfil AS perfil_nuevo
+            FROM historial_cambios h
+            LEFT JOIN planes pa ON pa.id_plan = h.id_plan_anterior
+            LEFT JOIN planes pn ON pn.id_plan = h.id_plan_nuevo
+            LEFT JOIN perfiles_mikrotik ppa ON ppa.id_perfil = h.id_perfil_anterior
+            LEFT JOIN perfiles_mikrotik ppn ON ppn.id_perfil = h.id_perfil_nuevo
+            ORDER BY h.fecha_cambio DESC, h.id_cambio DESC
+            LIMIT 200
+        ";
+
+        $historialCambios = $pdoCatalogo->query($sqlHistorial)->fetchAll();
+    } catch (Throwable $e) {
+        error_log('Error consultando historial UBB: ' . $e->getMessage());
+        $errorHistorial = 'No fue posible consultar el historial de cambios.';
+    }
+}
+
+/* API: bloqueada en esta entrega de modo consulta. */
+
+if (isset($_GET['api'])) {
+    jsonRespuesta([
+        'ok' => false,
+        'error' => 'Esta pantalla está en modo consulta. No se permiten cambios en MikroTik, RADIUS ni bases de datos.',
+    ], 423);
+}
+
+/* Consulta de perfiles y cuentas PPPoE en MikroTik */
+
+try {
+
+    $router = crearClienteMikrotik($mikrotikConfig);
+
+    $respuestaPerfiles = $router
+
+        ->query(new Query('/ppp/profile/print'))
+
+        ->read();
+
+    foreach ($respuestaPerfiles as $perfil) {
+
+        $nombre = (string) ($perfil['name'] ?? '');
+
+        if ($nombre === '') {
+
+            continue;
+
+        }
+
+        $perfiles[] = [
+
+            'nombre' => $nombre,
+
+            'rate_limit' => (string) ($perfil['rate-limit'] ?? ''),
+
+            'velocidad' => obtenerVelocidad(
+
+                (string) ($perfil['rate-limit'] ?? '')
+
+            ),
+
+        ];
+
+    }
+
+    $mapaCallerIdActivo = [];
+    $usuariosActivos = [];
+
+    $respuestaActivos = $router
+
+        ->query(new Query('/ppp/active/print'))
+
+        ->read();
+
+    foreach ($respuestaActivos as $activo) {
+
+        $usuarioActivo = mb_strtolower(
+
+            trim((string) ($activo['name'] ?? '')),
+
+            'UTF-8'
+
+        );
+
+        $macActiva = trim((string) ($activo['caller-id'] ?? ''));
+
+        if ($usuarioActivo !== '') {
+            $usuariosActivos[$usuarioActivo] = true;
+        }
+
+        if ($usuarioActivo !== '' && $macActiva !== '') {
+
+            $mapaCallerIdActivo[$usuarioActivo][] = $macActiva;
+
+        }
+
+    }
+
+    $totalConectados = count($usuariosActivos);
+
+    $respuestaClientes = $router
+
+        ->query(new Query('/ppp/secret/print'))
+
+        ->read();
+
+    // Una fila por nombre PPPoE; si RouterOS devuelve el mismo nombre más de una vez,
+    // se conserva una fila para el directorio y se marca explícitamente para revisión.
+    $clientesRouterUnicos = [];
+    foreach ($respuestaClientes as $registroRouter) {
+        $nombreRouter = trim((string) ($registroRouter['name'] ?? ''));
+        if ($nombreRouter === '') {
+            continue;
+        }
+        $claveRouter = mb_strtolower($nombreRouter, 'UTF-8');
+        if (isset($clientesRouterUnicos[$claveRouter])) {
+            $usuariosDuplicadosMikrotik[$claveRouter] = true;
+            continue;
+        }
+        $clientesRouterUnicos[$claveRouter] = $registroRouter;
+    }
+
+    foreach ($clientesRouterUnicos as $claveUsuario => $cliente) {
+
+        $usuario = (string) ($cliente['name'] ?? '');
+
+        if ($usuario === '') {
+
+            continue;
+
+        }
+
+        $perfilActual = (string) ($cliente['profile'] ?? 'default');
+
+        $perfilEncontrado = null;
+
+        foreach ($perfiles as $perfil) {
+
+            if ($perfil['nombre'] === $perfilActual) {
+
+                $perfilEncontrado = $perfil;
+
+                break;
+
+            }
+
+        }
+
+        $servicio = $mapaServicios[$claveUsuario] ?? null;
+        $estadoJamileth = $mapaEstadoPppoe[$claveUsuario] ?? null;
+
+        $callerIdsActivos = array_values(array_unique(
+
+            $mapaCallerIdActivo[$claveUsuario] ?? []
+
+        ));
+
+        $callerIdActual = implode(', ', $callerIdsActivos);
+
+        if ($callerIdActual === '') {
+
+            // caller-id es la restricción configurada; last-caller-id es el último equipo que usó la cuenta.
+            $callerIdActual = trim((string) ($cliente['caller-id'] ?? ''));
+
+            if ($callerIdActual === '') {
+                $callerIdActual = trim((string) ($cliente['last-caller-id'] ?? ''));
+            }
+
+        }
+
+        $idServicioCliente = trim(
+            (string) ($servicio['id_servicio'] ?? ($estadoJamileth['id_servicio'] ?? ''))
+        );
+
+        $asignacionComercial = $idServicioCliente !== ''
+            ? ($planesPorServicio[$idServicioCliente] ?? null)
+            : null;
+
+        $paqueteJamileth = trim(
+            (string) ($servicio['paquete_referencia'] ?? '')
+        );
+
+        $planMostrar = $asignacionComercial['nombre_plan']
+            ?? (
+                $paqueteJamileth !== ''
+                    ? $paqueteJamileth
+                    : (!empty($servicio['id_servicio'])
+                        ? 'Paquete sin registrar'
+                        : 'Plan por confirmar')
+            );
+
+        $clientes[] = [
+
+            'usuario' => $usuario,
+
+            'service' => (string) ($cliente['service'] ?? 'pppoe'),
+
+            'perfil' => $perfilActual,
+
+            'plan' => $planMostrar,
+
+            'precio_mensual' => $asignacionComercial['precio_mensual'] ?? null,
+
+            'estado_asignacion_comercial' =>
+                $asignacionComercial['estado_asignacion'] ?? '',
+
+            'velocidad' => $perfilEncontrado['velocidad'] ?? 'No definida',
+
+            'remote_address' => (string) (
+                trim((string) ($cliente['remote-address'] ?? '')) !== ''
+                    ? $cliente['remote-address']
+                    : ($servicio['ip'] ?? '')
+            ),
+
+            'caller_id' => $callerIdActual,
+
+            'disabled' => ($cliente['disabled'] ?? 'false') === 'true',
+
+            'comment' => (string) ($cliente['comment'] ?? ''),
+
+            'id_servicio' => $servicio['id_servicio'] ?? '',
+            'tecnologia' => $servicio['tecnologia'] ?? '',
+            'estado_servicio' => $servicio['estado_servicio'] ?? '',
+
+            'nombre_cliente' => $servicio['nombre_cliente'] ?? '',
+
+            'estado_integracion' => $estadoJamileth['estado'] ?? (
+                $jamilethPppoeDisponible ? 'SIN_REGISTRO_JAMILETH' : 'NO_VERIFICABLE_JAMILETH'
+            ),
+
+            'tipo_fuente_jamileth' => $estadoJamileth['tipo_fuente'] ?? '',
+
+            'estado_inventario' => $inventarioPppoeDisponible
+                ? (isset($mapaInventarioPppoe[$claveUsuario]) ? 'EN PPPOE_SECRETS' : 'NO EN PPPOE_SECRETS')
+                : (isset($mapaInventarioServicios[$claveUsuario])
+                    ? 'REFERENCIA EN CLIENTES_SERVICIOS'
+                    : 'NO VERIFICADO'),
+
+            'inventario_servicio_id' => $mapaInventarioServicios[$claveUsuario]['id_servicio'] ?? '',
+
+            'duplicado_mikrotik' => isset($usuariosDuplicadosMikrotik[$claveUsuario]),
+
+        ];
+
+    }
+
+    usort(
+
+        $clientes,
+
+        fn($a, $b) => strcasecmp($a['usuario'], $b['usuario'])
+
+    );
+
+    usort(
+
+        $perfiles,
+
+        fn($a, $b) => strcasecmp($a['nombre'], $b['nombre'])
+
+    );
+
+} catch (Throwable $e) {
+
+    error_log('UBB planes: error de conexión MikroTik: ' . $e->getMessage());
+
+    $errorConexion = 'No fue posible consultar MikroTik. Verifica MIKROTIK_HOST, MIKROTIK_USER y MIKROTIK_PASS.';
+
+}
+
+// Relaciona cuentas y concesiones con atributos RADIUS en modo de solo lectura.
+$identidadesRadius = [];
+$atributosRadius = [];
+$errorConsultaRadius = null;
+$pdoRadiusRead = null;
+try {
+    $radiusReadConfig = $dbConfig;
+    $radiusReadConfig['database'] = 'radius';
+    $pdoRadiusRead = obtenerPDO($radiusReadConfig);
+
+    $identidadesRadius = [];
+    foreach ($pdoRadiusRead->query("SELECT username FROM radcheck") as $filaRadius) {
+        $usuarioRadius = strtoupper(trim((string) ($filaRadius['username'] ?? '')));
+        if ($usuarioRadius !== '') {
+            $identidadesRadius[$usuarioRadius] = true;
+        }
+    }
+
+    $atributosRadius = [];
+    $sqlAtributosRadius = "SELECT username, attribute, value FROM radreply WHERE attribute IN ('Mikrotik-Rate-Limit', 'Mikrotik-Address-List', 'Mikrotik-Group')";
+    foreach ($pdoRadiusRead->query($sqlAtributosRadius) as $filaRadius) {
+        $usuarioRadius = strtoupper(trim((string) ($filaRadius['username'] ?? '')));
+        $atributoRadius = (string) ($filaRadius['attribute'] ?? '');
+        if ($usuarioRadius === '' || $atributoRadius === '') {
+            continue;
+        }
+        $atributosRadius[$usuarioRadius][$atributoRadius][] = (string) ($filaRadius['value'] ?? '');
+    }
+
+    foreach ($clientes as &$clienteRadius) {
+        // En PPPoE, FreeRADIUS identifica la cuenta por el nombre del secret.
+        // La MAC (caller-id) es un dato técnico adicional, no el username PPPoE.
+        $usuarioRadius = strtoupper(trim((string) ($clienteRadius['usuario'] ?? '')));
+        $rateRows = $usuarioRadius !== '' ? ($atributosRadius[$usuarioRadius]['Mikrotik-Rate-Limit'] ?? []) : [];
+        $listRows = $usuarioRadius !== '' ? ($atributosRadius[$usuarioRadius]['Mikrotik-Address-List'] ?? []) : [];
+        $confirmada = $usuarioRadius !== ''
+            && isset($identidadesRadius[$usuarioRadius])
+            && count($rateRows) === 1;
+
+        $clienteRadius['radius_username'] = $usuarioRadius;
+        $clienteRadius['radius_identidad_confirmada'] = $confirmada;
+        $clienteRadius['radius_rate_limit'] = count($rateRows) === 1 ? (string) $rateRows[0] : '';
+        $clienteRadius['radius_lista'] = count($listRows) === 1 ? (string) $listRows[0] : '';
+        $clienteRadius['velocidad_mostrar'] = $confirmada
+            ? obtenerVelocidad((string) $rateRows[0])
+            : (string) ($clienteRadius['velocidad'] ?? 'No definida');
+    }
+    unset($clienteRadius);
+} catch (Throwable $e) {
+    error_log('UBB planes: no se pudo consultar identidad RADIUS: ' . $e->getMessage());
+    $errorConsultaRadius = 'No se pudo consultar RADIUS; no se habilitarán cambios hasta resolver la consulta.';
+    $identidadesRadius = [];
+    $atributosRadius = [];
+    foreach ($clientes as &$clienteRadius) {
+        $clienteRadius['radius_username'] = strtoupper(trim((string) ($clienteRadius['usuario'] ?? '')));
+        $clienteRadius['radius_identidad_confirmada'] = false;
+        $clienteRadius['radius_rate_limit'] = '';
+        $clienteRadius['radius_lista'] = '';
+        $clienteRadius['velocidad_mostrar'] = (string) ($clienteRadius['velocidad'] ?? 'No definida');
+    }
+    unset($clienteRadius);
+}
+
+/* CENTRO RADIUS: historial y accounting en modo exclusivamente de lectura. */
+$servicioCentroRadius = strtolower(trim((string) ($_GET['servicio'] ?? 'todos')));
+if (!in_array($servicioCentroRadius, ['todos', 'pppoe', 'dhcp'], true)) {
+    $servicioCentroRadius = 'todos';
+}
+$sesionesCentroRadius = [];
+$errorCentroRadius = null;
+$resumenCentroRadius = [
+    'pppoe' => [
+        'nombre' => 'RESIDENTES',
+        'nas' => '10.0.2.230',
+        'total' => 0,
+        'abiertas' => 0,
+        'ultima' => null,
+    ],
+    'dhcp' => [
+        'nombre' => 'MKR-FSL02',
+        'nas' => '10.0.1.6',
+        'total' => 0,
+        'abiertas' => 0,
+        'ultima' => null,
+    ],
+];
+
+if ($moduloActual === 'centro-radius') {
+    try {
+        if (!($pdoRadiusRead instanceof PDO)) {
+            throw new RuntimeException('No hay conexión disponible de solo lectura con la base radius.');
+        }
+
+        // Resumen por NAS. "Abiertas" significa acctstoptime IS NULL en radacct;
+        // no sustituye la comprobación de sesión activa directamente en RouterOS.
+        $sqlResumenCentro = "
+            SELECT
+                nasipaddress,
+                COUNT(*) AS total,
+                SUM(CASE WHEN acctstoptime IS NULL THEN 1 ELSE 0 END) AS abiertas,
+                MAX(COALESCE(acctupdatetime, acctstarttime)) AS ultima
+            FROM radacct
+            WHERE nasipaddress IN (?, ?)
+            GROUP BY nasipaddress
+        ";
+        $stmtResumenCentro = $pdoRadiusRead->prepare($sqlResumenCentro);
+        $stmtResumenCentro->execute(['10.0.2.230', '10.0.1.6']);
+        foreach ($stmtResumenCentro->fetchAll() as $filaResumenCentro) {
+            $nasResumen = (string) ($filaResumenCentro['nasipaddress'] ?? '');
+            $claveResumen = $nasResumen === '10.0.2.230'
+                ? 'pppoe'
+                : ($nasResumen === '10.0.1.6' ? 'dhcp' : '');
+            if ($claveResumen !== '') {
+                $resumenCentroRadius[$claveResumen]['total'] = (int) $filaResumenCentro['total'];
+                $resumenCentroRadius[$claveResumen]['abiertas'] = (int) $filaResumenCentro['abiertas'];
+                $resumenCentroRadius[$claveResumen]['ultima'] = $filaResumenCentro['ultima'];
+            }
+        }
+
+        // Último registro sin Stop por NAS para mostrar el último contexto conocido.
+        $sqlUltimaAbiertaCentro = "
+            SELECT username, nasportid, framedipaddress, acctsessionid, acctstarttime
+            FROM radacct
+            WHERE nasipaddress = ? AND acctstoptime IS NULL
+            ORDER BY COALESCE(acctupdatetime, acctstarttime) DESC, radacctid DESC
+            LIMIT 1
+        ";
+        $stmtUltimaAbiertaCentro = $pdoRadiusRead->prepare($sqlUltimaAbiertaCentro);
+        foreach (['pppoe' => '10.0.2.230', 'dhcp' => '10.0.1.6'] as $claveServicioCentro => $nasServicioCentro) {
+            $stmtUltimaAbiertaCentro->execute([$nasServicioCentro]);
+            $resumenCentroRadius[$claveServicioCentro]['ultima_abierta'] = $stmtUltimaAbiertaCentro->fetch() ?: null;
+        }
+
+        $whereServicioCentro = '';
+        $parametrosCentro = ['10.0.2.230', '10.0.1.6'];
+        if ($servicioCentroRadius === 'pppoe') {
+            $whereServicioCentro = ' AND nasipaddress = ? ';
+            $parametrosCentro[] = '10.0.2.230';
+        } elseif ($servicioCentroRadius === 'dhcp') {
+            $whereServicioCentro = ' AND nasipaddress = ? ';
+            $parametrosCentro[] = '10.0.1.6';
+        }
+
+        $sqlSesionesCentro = "
+            SELECT
+                radacctid,
+                acctsessionid,
+                username,
+                nasipaddress,
+                nasportid,
+                nasporttype,
+                acctstarttime,
+                acctupdatetime,
+                acctstoptime,
+                acctsessiontime,
+                acctauthentic,
+                acctinputoctets,
+                acctoutputoctets,
+                calledstationid,
+                callingstationid,
+                acctterminatecause,
+                framedipaddress
+            FROM radacct
+            WHERE nasipaddress IN (?, ?)
+            $whereServicioCentro
+            ORDER BY COALESCE(acctstoptime, acctupdatetime, acctstarttime) DESC, radacctid DESC
+            LIMIT 100
+        ";
+        $stmtSesionesCentro = $pdoRadiusRead->prepare($sqlSesionesCentro);
+        $stmtSesionesCentro->execute($parametrosCentro);
+        $sesionesCentroRadius = $stmtSesionesCentro->fetchAll();
+    } catch (Throwable $e) {
+        error_log('UBB Centro RADIUS: error de consulta radacct: ' . $e->getMessage());
+        $errorCentroRadius = 'No fue posible consultar radacct. Verifica los permisos de lectura del usuario SQL y la disponibilidad de la base radius.';
+        $sesionesCentroRadius = [];
+    }
+}
+
+/* Directorio DHCP: consultas independientes, solo al abrir el módulo DHCP y en solo lectura. */
+if ($moduloActual === 'dhcp') {
+    if ($pdoJamileth instanceof PDO) {
+        try {
+            $mapaIntegracionDhcp = obtenerMapaIntegracionDhcp($pdoJamileth);
+        } catch (Throwable $e) {
+            error_log('UBB planes: no se pudo consultar la integración DHCP de Jamileth: ' . $e->getMessage());
+            $errorIntegracionDhcp = 'No fue posible consultar las relaciones DHCP de Jamileth.';
+            $mapaIntegracionDhcp = [];
+        }
+    } else {
+        $errorIntegracionDhcp = 'No está disponible la conexión de solo lectura con Jamileth.';
+    }
+
+    if (isset($router) && $router instanceof Client) {
+        try {
+            $respuestaConcesionesDhcp = $router
+                ->query(new Query('/ip/dhcp-server/lease/print'))
+                ->read();
+
+            // Perfiles PCQ previamente verificados en Mangle y Queue Tree.
+            $mapaPerfilesPcqVerificados = [
+                '20M_VLAN41' => ['descarga' => '20MVLAN41D', 'subida' => '20MVLAN41U'],
+                '20M_VLAN1500' => ['descarga' => '20MVLAN1500D', 'subida' => '20MVLAN1500U'],
+                '20M_VLAN1600' => ['descarga' => '20MVLAN1600D', 'subida' => '20MVLAN1600U'],
+            ];
+
+            $tiposPcqDhcp = [];
+            try {
+                foreach ($router->query(new Query('/queue/type/print'))->read() as $tipoPcq) {
+                    $nombreTipo = trim((string) ($tipoPcq['name'] ?? ''));
+                    if ($nombreTipo !== '') {
+                        $tiposPcqDhcp[$nombreTipo] = [
+                            'kind' => strtolower((string) ($tipoPcq['kind'] ?? '')),
+                            'rate' => (string) ($tipoPcq['pcq-rate'] ?? ''),
+                            'classifier' => strtolower((string) ($tipoPcq['pcq-classifier'] ?? '')),
+                        ];
+                    }
+                }
+            } catch (Throwable $e) {
+                error_log('UBB DHCP: no se pudieron consultar los tipos PCQ: ' . $e->getMessage());
+            }
+
+            $convertirRateMbps = static function ($rate): ?float {
+                if (!preg_match('/^([0-9]+(?:\.[0-9]+)?)([KMG]?)$/i', trim((string) $rate), $m)) {
+                    return null;
+                }
+                $valor = (float) $m[1];
+                $unidad = strtoupper($m[2]);
+                if ($unidad === 'K') $valor /= 1000;
+                if ($unidad === 'G') $valor *= 1000;
+                return $valor;
+            };
+
+            foreach ($respuestaConcesionesDhcp as $lease) {
+                $servidor = trim((string) ($lease['active-server'] ?? ''));
+                if ($servidor === '') {
+                    $servidor = trim((string) ($lease['server'] ?? ''));
+                }
+
+                $mac = strtoupper(trim((string) ($lease['active-mac-address'] ?? '')));
+                if ($mac === '') {
+                    $mac = strtoupper(trim((string) ($lease['mac-address'] ?? '')));
+                }
+
+                $ip = trim((string) ($lease['active-address'] ?? ''));
+                if ($ip === '') {
+                    $ip = trim((string) ($lease['address'] ?? ''));
+                }
+
+                $hostname = trim((string) ($lease['host-name'] ?? ''));
+                $listaRaw = $lease['address-lists'] ?? $lease['address-list'] ?? '';
+                $listaMikrotik = is_array($listaRaw)
+                    ? implode(',', array_map('strval', $listaRaw))
+                    : trim((string) $listaRaw);
+                $estadoLease = strtolower(trim((string) ($lease['status'] ?? 'sin_estado')));
+                $dynamicRaw = $lease['dynamic'] ?? null;
+                $esDinamica = $dynamicRaw !== null && in_array(
+                    strtolower(trim((string) $dynamicRaw)),
+                    ['true', 'yes', '1'],
+                    true
+                );
+                $tipoLease = $dynamicRaw === null
+                    ? 'NO INFORMADO'
+                    : ($esDinamica ? 'DINÁMICA' : 'ESTÁTICA');
+
+                $claveDhcp = $servidor !== '' && $mac !== ''
+                    ? strtolower($servidor) . '|' . $mac
+                    : '';
+                $integracion = $claveDhcp !== ''
+                    ? ($mapaIntegracionDhcp[$claveDhcp] ?? null)
+                    : null;
+
+                if ($integracion === null) {
+                    $estadoIntegracion = $errorIntegracionDhcp !== null
+                        ? 'NO VERIFICABLE EN JAMILETH'
+                        : 'SIN REGISTRO EN JAMILETH';
+                    $integracion = [];
+                } else {
+                    $estadoIntegracion = (string) ($integracion['estado_integracion'] ?? 'PENDIENTE');
+                }
+
+                $rateRows = $mac !== '' ? ($atributosRadius[$mac]['Mikrotik-Rate-Limit'] ?? []) : [];
+                $listRows = $mac !== '' ? ($atributosRadius[$mac]['Mikrotik-Address-List'] ?? []) : [];
+                $macValida = (bool) preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/', $mac);
+                $radiusConfigurado = $macValida
+                    && isset($identidadesRadius[$mac])
+                    && count($listRows) === 1;
+
+                $idServicioDhcp = trim((string) ($integracion['id_servicio'] ?? ''));
+                $asignacionDhcp = $idServicioDhcp !== ''
+                    ? ($planesPorServicio[$idServicioDhcp] ?? null)
+                    : null;
+                $tecnologiaDhcp = strtoupper(trim((string) ($integracion['tecnologia'] ?? '')));
+                $detalleVelocidadDhcp = null;
+                $estadoPlanDhcp = 'SIN RELACIÓN CONFIRMADA';
+
+                if ($estadoIntegracion === 'RELACIONADO') {
+                    if (strtoupper(trim((string) ($integracion['estado_servicio'] ?? ''))) !== 'ACTIVO') {
+                        $estadoPlanDhcp = 'SERVICIO INACTIVO';
+                    } elseif (!is_array($asignacionDhcp)) {
+                        $estadoPlanDhcp = 'SIN PLAN ASIGNADO';
+                    } elseif (($asignacionDhcp['estado_asignacion'] ?? '') !== 'ACTIVA') {
+                        $estadoPlanDhcp = 'ASIGNACIÓN INACTIVA';
+                    } elseif (($asignacionDhcp['estado_plan'] ?? '') !== 'ACTIVO') {
+                        $estadoPlanDhcp = 'PLAN INACTIVO';
+                    } elseif (!in_array($tecnologiaDhcp, ['INALAMBRICO', 'FIBRA'], true)) {
+                        $estadoPlanDhcp = 'TECNOLOGÍA PENDIENTE';
+                    } else {
+                        $idPlanDhcp = (int) $asignacionDhcp['id_plan'];
+                        $detalleVelocidadDhcp =
+                            $velocidadesPorPlan[$idPlanDhcp]['velocidades_detalle'][$tecnologiaDhcp] ?? null;
+
+                        if (!is_array($detalleVelocidadDhcp)) {
+                            $estadoPlanDhcp = 'VELOCIDAD NO DEFINIDA';
+                        } elseif (
+                            $detalleVelocidadDhcp['descarga'] === null
+                            || $detalleVelocidadDhcp['subida'] === null
+                        ) {
+                            $estadoPlanDhcp = 'VELOCIDAD INCOMPLETA';
+                        } else {
+                            $estadoPlanDhcp = 'PLAN Y VELOCIDAD IDENTIFICADOS';
+                        }
+                    }
+                }
+
+                // Compara el plan comercial contra PCQ real, solo para listas verificadas.
+                $pcqDescarga = null;
+                $pcqSubida = null;
+                $estadoPcq = $listaMikrotik === ''
+                    ? 'SIN LISTA MIKROTIK'
+                    : 'LISTA SIN PERFIL PCQ VALIDADO';
+
+                $perfilPcq = $mapaPerfilesPcqVerificados[$listaMikrotik] ?? null;
+                if ($perfilPcq) {
+                    $tipoDescarga = $tiposPcqDhcp[$perfilPcq['descarga']] ?? null;
+                    $tipoSubida = $tiposPcqDhcp[$perfilPcq['subida']] ?? null;
+
+                    $pcqValido = is_array($tipoDescarga) && is_array($tipoSubida)
+                        && $tipoDescarga['kind'] === 'pcq'
+                        && $tipoDescarga['classifier'] === 'dst-address'
+                        && $tipoSubida['kind'] === 'pcq'
+                        && $tipoSubida['classifier'] === 'src-address';
+
+                    if ($pcqValido) {
+                        $pcqDescarga = $convertirRateMbps($tipoDescarga['rate']);
+                        $pcqSubida = $convertirRateMbps($tipoSubida['rate']);
+
+                        if ($pcqDescarga === null || $pcqSubida === null) {
+                            $estadoPcq = 'PCQ SIN VELOCIDAD LEGIBLE';
+                        } elseif (
+                            !is_array($detalleVelocidadDhcp)
+                            || $detalleVelocidadDhcp['descarga'] === null
+                            || $detalleVelocidadDhcp['subida'] === null
+                        ) {
+                            $estadoPcq = 'PENDIENTE VALIDACIÓN COMERCIAL';
+                        } elseif (
+                            abs($pcqDescarga - $detalleVelocidadDhcp['descarga']) < 0.01
+                            && abs($pcqSubida - $detalleVelocidadDhcp['subida']) < 0.01
+                        ) {
+                            $estadoPcq = 'COINCIDE';
+                        } else {
+                            $estadoPcq = 'DIFERENCIA';
+                        }
+                    } else {
+                        $estadoPcq = 'PCQ NO DISPONIBLE O DIFERENTE';
+                    }
+                }
+
+                $concesionesDhcp[] = [
+                    'servidor' => $servidor,
+                    'lista_mikrotik' => $listaMikrotik,
+                    'pcq_descarga' => $pcqDescarga,
+                    'pcq_subida' => $pcqSubida,
+                    'estado_pcq' => $estadoPcq,
+                    'mac' => $mac,
+                    'ip' => $ip,
+                    'hostname' => $hostname !== ''
+                        ? $hostname
+                        : (string) ($integracion['hostname'] ?? ''),
+                    'estado' => $estadoLease,
+                    'tipo' => $tipoLease,
+                    'id_cliente' => (string) ($integracion['id_cliente'] ?? ''),
+                    'id_servicio' => (string) ($integracion['id_servicio'] ?? ''),
+                    'nombre_cliente' => (string) ($integracion['nombre_cliente'] ?? ''),
+                    'tecnologia' => $tecnologiaDhcp,
+                    'plan_comercial' => is_array($asignacionDhcp)
+                        ? (string) $asignacionDhcp['nombre_plan'] : '',
+                    'estado_plan_dhcp' => $estadoPlanDhcp,
+                    'velocidad_comercial_descarga' => $detalleVelocidadDhcp['descarga'] ?? null,
+                    'velocidad_comercial_subida' => $detalleVelocidadDhcp['subida'] ?? null,
+                    'estado_integracion' => $estadoIntegracion,
+                    'radius_configurado' => $radiusConfigurado,
+                    'radius_rate_limit' => count($rateRows) === 1 ? (string) $rateRows[0] : '',
+                    'radius_velocidad' => count($rateRows) === 1
+                        ? obtenerVelocidad((string) $rateRows[0])
+                        : 'No disponible',
+                    'radius_lista' => count($listRows) === 1 ? (string) $listRows[0] : '',
+                ];
+
+                if ($estadoIntegracion === 'RELACIONADO') {
+                    $dhcpConRelacion++;
+                } else {
+                    $dhcpPendientes++;
+                }
+                if ($estadoLease === 'bound') {
+                    $dhcpBound++;
+                }
+                if ($radiusConfigurado) {
+                    $dhcpConListaRadius++;
+                }
+            }
+
+            usort($concesionesDhcp, function ($a, $b) {
+                $servidorCmp = strcasecmp($a['servidor'], $b['servidor']);
+                return $servidorCmp !== 0 ? $servidorCmp : strcasecmp($a['hostname'], $b['hostname']);
+            });
+        } catch (Throwable $e) {
+            error_log('UBB planes: error al consultar concesiones DHCP en MikroTik: ' . $e->getMessage());
+            $errorConsultaDhcp = 'No fue posible consultar las concesiones DHCP de MikroTik.';
+            $concesionesDhcp = [];
+        }
+    } else {
+        $errorConsultaDhcp = 'No hay una conexión disponible con MikroTik para consultar DHCP.';
+    }
+}
+
+
+/* SOLICITUDES: DATOS Y REGISTRO CONTROLADO */
+$relacionesSolicitud = [];
+$planesSolicitud = [];
+$serviciosSolicitud = [];
+$errorRelacionesSolicitud = null;
+$errorFormularioSolicitud = null;
+$flashSolicitud = null;
+
+try {
+    if (!($pdoCatalogo instanceof PDO)) {
+        throw new RuntimeException('No hay conexión con ubb_gestion_planes.');
+    }
+
+    $sqlRelaciones = "
+        SELECT
+            pp.id_plan,
+            pp.id_perfil,
+            pp.estado_validacion,
+            p.nombre_plan,
+            pm.nombre_perfil,
+            pm.rate_limit,
+            v.velocidad_bajada_mbps,
+            v.velocidad_subida_mbps
+        FROM plan_perfiles pp
+        INNER JOIN planes p
+            ON p.id_plan = pp.id_plan
+        INNER JOIN perfiles_mikrotik pm
+            ON pm.id_perfil = pp.id_perfil
+        LEFT JOIN plan_velocidades v
+            ON v.id_plan = pp.id_plan
+            AND BINARY v.tecnologia = BINARY pp.tecnologia
+        WHERE pp.tecnologia = 'INALAMBRICO'
+          AND pp.estado_validacion IN ('PENDIENTE', 'CONFIRMADO')
+          AND p.estado = 'ACTIVO'
+          AND pm.estado = 'ACTIVO'
+        ORDER BY p.id_plan, pm.nombre_perfil
+    ";
+
+    $relacionesSolicitud = $pdoCatalogo->query($sqlRelaciones)->fetchAll();
+
+    foreach ($relacionesSolicitud as $relacion) {
+        $idPlan = (string) $relacion['id_plan'];
+        $planesSolicitud[$idPlan] = [
+            'id_plan' => $idPlan,
+            'nombre' => $relacion['nombre_plan'],
+            'descarga' => $relacion['velocidad_bajada_mbps'],
+            'subida' => $relacion['velocidad_subida_mbps']
+        ];
+    }
+} catch (Throwable $e) {
+    error_log('UBB solicitudes: error al consultar relaciones: ' . $e->getMessage());
+    $errorRelacionesSolicitud = 'No fue posible consultar las relaciones entre planes y perfiles.';
+}
+
+foreach ($clientes as $clienteSolicitud) {
+    $id = trim((string) ($clienteSolicitud['id_servicio'] ?? ''));
+    $asignacion = $id !== '' ? ($planesPorServicio[$id] ?? null) : null;
+
+    if (
+        $id === ''
+        || !empty($clienteSolicitud['disabled'])
+        || strtoupper(trim((string) ($clienteSolicitud['tecnologia'] ?? ''))) !== 'INALAMBRICO'
+        || strtoupper(trim((string) ($clienteSolicitud['estado_servicio'] ?? ''))) !== 'ACTIVO'
+        || !$asignacion
+        || ($asignacion['estado_asignacion'] ?? '') !== 'ACTIVA'
+    ) {
+        continue;
+    }
+
+    $serviciosSolicitud[$id] = [
+        'id_servicio' => $id,
+        'nombre' => (string) ($clienteSolicitud['nombre_cliente'] ?? ''),
+        'usuario' => (string) ($clienteSolicitud['usuario'] ?? ''),
+        'plan_actual' => (string) ($asignacion['nombre_plan'] ?? '')
+    ];
+}
+
+$csrfSolicitud = $_SESSION['csrf_solicitud'] ?? '';
+if ($csrfSolicitud === '') {
+    $csrfSolicitud = bin2hex(random_bytes(32));
+    $_SESSION['csrf_solicitud'] = $csrfSolicitud;
+}
+
+if (isset($_SESSION['flash_solicitud'])) {
+    $flashSolicitud = $_SESSION['flash_solicitud'];
+    unset($_SESSION['flash_solicitud']);
+}
+
+/* Registro mediante el procedimiento almacenado. */
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && ($_POST['accion'] ?? '') === 'registrar_solicitud'
+) {
+    try {
+        if (!hash_equals($csrfSolicitud, (string) ($_POST['csrf_solicitud'] ?? ''))) {
+            throw new RuntimeException('La sesión del formulario venció. Recarga la página.');
+        }
+
+        $idServicio = filter_var($_POST['id_servicio'] ?? '', FILTER_VALIDATE_INT);
+        $idPlan = filter_var($_POST['id_plan_nuevo'] ?? '', FILTER_VALIDATE_INT);
+        $idPerfil = filter_var($_POST['id_perfil_nuevo'] ?? '', FILTER_VALIDATE_INT);
+        $responsable = trim((string) ($_POST['responsable'] ?? ''));
+        $motivo = trim((string) ($_POST['motivo'] ?? ''));
+
+        if (!$idServicio || !$idPlan || !$idPerfil) {
+            throw new RuntimeException('Selecciona un servicio, plan y perfil válidos.');
+        }
+
+        if (!isset($serviciosSolicitud[(string) $idServicio])) {
+            throw new RuntimeException('El servicio no está disponible para solicitar cambios.');
+        }
+
+        if ($responsable === '' || strlen($responsable) > 100) {
+            throw new RuntimeException('Escribe un responsable válido (máximo 100 caracteres).');
+        }
+
+        if ($motivo === '' || strlen($motivo) > 255) {
+            throw new RuntimeException('Escribe un motivo de hasta 255 caracteres.');
+        }
+
+        $relacionPermitida = false;
+        foreach ($relacionesSolicitud as $relacion) {
+            if (
+                (int) $relacion['id_plan'] === $idPlan
+                && (int) $relacion['id_perfil'] === $idPerfil
+            ) {
+                $relacionPermitida = true;
+                break;
+            }
+        }
+
+        if (!$relacionPermitida) {
+            throw new RuntimeException('La combinación de plan y perfil no está disponible.');
+        }
+
+        if (!($pdoCatalogo instanceof PDO)) {
+            throw new RuntimeException('No hay conexión con la base de gestión de planes.');
+        }
+
+        $stmt = $pdoCatalogo->prepare(
+            'CALL sp_registrar_solicitud_cambio(?, ?, ?, ?, ?, ?)'
+        );
+
+        // Las cuentas que aparecen aquí provienen del directorio PPPoE.
+        $stmt->execute([
+            $idServicio,
+            $idPlan,
+            $idPerfil,
+            'PPPOE',
+            $responsable,
+            $motivo
+        ]);
+
+        $resultado = $stmt->fetch(PDO::FETCH_ASSOC) ?: [];
+        $stmt->closeCursor();
+
+        $idCambio = (int) ($resultado['id_cambio'] ?? 0);
+        if ($idCambio <= 0) {
+            throw new RuntimeException('El procedimiento no devolvió un folio de solicitud.');
+        }
+
+        $_SESSION['flash_solicitud'] = [
+            'id' => $idCambio,
+            'tipo' => 'success'
+        ];
+
+        header('Location: ?modulo=solicitudes');
+        exit;
+
+    } catch (Throwable $e) {
+        error_log('UBB solicitudes: ' . $e->getMessage());
+
+        if ($e instanceof PDOException && ($e->errorInfo[0] ?? '') === '45000') {
+            $errorFormularioSolicitud = (string) ($e->errorInfo[2] ?? 'La base de datos rechazó la solicitud.');
+        } elseif ($e instanceof RuntimeException) {
+            $errorFormularioSolicitud = $e->getMessage();
+        } else {
+            $errorFormularioSolicitud = 'No fue posible registrar la solicitud. Revisa la conexión y vuelve a intentarlo.';
+        }
+    }
+}
+
+
+$totalClientes = count($clientes);
+
+$clientesHabilitados = 0;
+
+$clientesDeshabilitados = 0;
+
+$clientesRelacionados = 0;
+$clientesPppoePendientes = 0;
+$clientesSinRegistroJamileth = 0;
+$clientesRelacionadosHibridos = 0;
+$clientesRelacionAmbigua = 0;
+$clientesRevisarRelacion = 0;
+$clientesDuplicadosMikrotik = 0;
+$clientesInventarioEnSecrets = 0;
+$usoPerfiles = [];
+
+foreach ($clientes as $cliente) {
+
+    if ($cliente['disabled']) {
+
+        $clientesDeshabilitados++;
+
+    } else {
+
+        $clientesHabilitados++;
+
+    }
+
+    switch ($cliente['estado_integracion']) {
+        case 'RELACIONADO':
+            $clientesRelacionados++;
+            break;
+        case 'RELACIONADO_DHCP_PPPOE':
+            $clientesRelacionadosHibridos++;
+            break;
+        case 'PENDIENTE':
+            $clientesPppoePendientes++;
+            break;
+        case 'SIN_REGISTRO_JAMILETH':
+            $clientesSinRegistroJamileth++;
+            break;
+        case 'RELACION_AMBIGUA':
+            $clientesRelacionAmbigua++;
+            break;
+        case 'REVISAR_RELACION':
+            $clientesRevisarRelacion++;
+            break;
+    }
+
+    if (!empty($cliente['duplicado_mikrotik'])) {
+        $clientesDuplicadosMikrotik++;
+    }
+    if (($cliente['estado_inventario'] ?? '') === 'EN PPPOE_SECRETS') {
+        $clientesInventarioEnSecrets++;
+    }
+
+    if (perfilVisibleParaUsuario($cliente['perfil'])) {
+
+        $plan = obtenerNombreComercialPerfil($cliente['perfil']);
+
+        $usoPerfiles[$plan] = ($usoPerfiles[$plan] ?? 0) + 1;
+
+    }
+
+}
+
+$ordenPlanes = ['Básico', 'Intermedio', 'Avanzado'];
+
+$datosGraficaNombres = [];
+
+$datosGraficaValores = [];
+
+foreach ($ordenPlanes as $plan) {
+
+    $datosGraficaNombres[] = $plan;
+
+    $datosGraficaValores[] = $usoPerfiles[$plan] ?? 0;
+
+}
+
+$planesDisponibles = array_values(array_filter(
+
+    $perfiles,
+
+    fn($perfil) => perfilVisibleParaUsuario($perfil['nombre'])
+
+));
+
+usort($planesDisponibles, function ($a, $b) use ($ordenPlanes) {
+
+    return array_search(
+
+        obtenerNombreComercialPerfil($a['nombre']),
+
+        $ordenPlanes,
+
+        true
+
+    ) <=> array_search(
+
+        obtenerNombreComercialPerfil($b['nombre']),
+
+        $ordenPlanes,
+
+        true
+
+    );
+
+});
+
+?>
+
+<!DOCTYPE html>
+
+<html lang="es">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Gestión de planes | UBB Comunicaciones</title>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+:root{
+    color-scheme:light;
+    --bg:#f5f4fa;
+    --surface:#ffffff;
+    --surface-soft:#faf9fd;
+    --ink:#292435;
+    --muted:#777287;
+    --line:#e9e6f0;
+    --line-strong:#dcd6e8;
+    --plum:#322744;
+    --plum-2:#4b3b68;
+    --plum-3:#7054c7;
+    --lavender:#b9a9ef;
+    --lavender-soft:#f0ecfb;
+    --lavender-pale:#f8f6fd;
+    --green:#25815d;
+    --green-soft:#e9f7ef;
+    --red:#bb555d;
+    --red-soft:#fff0f1;
+    --shadow:0 12px 34px rgba(46,35,75,.065);
+    --shadow-hover:0 18px 42px rgba(46,35,75,.11);
+    --radius:18px;
+    --radius-sm:12px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:22px}
+body{margin:0;background:radial-gradient(ellipse at 80% 0%,rgba(187,169,239,.16),transparent 33%),var(--bg);color:var(--ink);font-family:Inter,"Segoe UI",Arial,Helvetica,sans-serif;font-size:13px;line-height:1.55;-webkit-font-smoothing:antialiased}
+button,input{font:inherit}
+button{cursor:pointer}
+button:disabled{cursor:not-allowed;opacity:.48}
+a{color:inherit;text-decoration:none}
+::selection{background:#e6ddff;color:#33244f}
+.app-shell{min-height:100vh;display:grid;grid-template-columns:258px minmax(0,1fr)}
+.sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:26px 17px 19px;background:linear-gradient(160deg,#302440 0%,#3e2d59 52%,#2e2540 100%);color:#f8f6ff;overflow-y:auto;box-shadow:8px 0 34px rgba(35,24,54,.10);z-index:20}
+.sidebar:before{content:"";position:absolute;inset:auto -65px 18% auto;width:190px;height:190px;border-radius:50%;background:rgba(164,136,245,.12);filter:blur(2px);pointer-events:none}
+.sidebar-brand{position:relative;display:flex;align-items:center;gap:12px;padding:3px 9px 25px;border-bottom:1px solid rgba(255,255,255,.12)}
+.brand-monogram{width:45px;height:45px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:linear-gradient(145deg,rgba(255,255,255,.18),rgba(255,255,255,.06));box-shadow:0 8px 20px rgba(0,0,0,.13);font-weight:850;font-size:14px;letter-spacing:.7px}
+.sidebar-brand strong{display:block;font-size:13px;letter-spacing:.6px}
+.sidebar-brand small{display:block;margin-top:3px;color:#c9bfdc;font-size:9px;letter-spacing:1.3px;text-transform:uppercase}
+.sidebar-label{padding:26px 12px 10px;color:#a99cbd;font-size:9px;font-weight:800;letter-spacing:1.5px;text-transform:uppercase}
+.sidebar-nav{display:grid;gap:15px}
+.nav-group{display:grid;gap:5px;min-width:0}
+.nav-group-label{padding:0 12px 3px;color:#a99cbd;font-size:9px;font-weight:850;letter-spacing:1.1px;text-transform:uppercase}
+.nav-link{position:relative;display:flex;align-items:center;gap:12px;padding:11px 13px;border:1px solid transparent;border-radius:12px;color:#ded7eb;font-size:12px;font-weight:650;transition:background .2s,border-color .2s,transform .2s}
+.nav-link:hover{background:rgba(255,255,255,.09);border-color:rgba(255,255,255,.08);transform:translateX(2px)}
+.nav-link.active{background:linear-gradient(100deg,rgba(154,126,235,.34),rgba(154,126,235,.13));border-color:rgba(205,190,255,.22);color:#fff;box-shadow:inset 3px 0 #c8b8ff,0 7px 18px rgba(20,13,34,.12)}
+.nav-icon{width:20px;text-align:center;color:#c7b9ed;font-size:17px}
+.sidebar-spacer{flex:1;min-height:25px}
+.sidebar-status{position:relative;padding:14px 15px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:rgba(255,255,255,.065);backdrop-filter:blur(8px)}
+.sidebar-status-title{margin-bottom:10px;color:#c6bbd8;font-size:9px;font-weight:800;letter-spacing:1.15px;text-transform:uppercase}
+.status-line{display:flex;align-items:center;gap:10px;padding:7px 0;color:#f6f3fb;font-size:11px}
+.status-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#60d69b;box-shadow:0 0 0 4px rgba(96,214,155,.13)}
+.status-dot.error{background:#ff8c96;box-shadow:0 0 0 4px rgba(255,140,150,.13)}
+.status-line small{display:block;color:#bfb5cf;font-size:9px}
+.main-area{min-width:0}
+.contenedor{width:min(1820px,100%);margin:0 auto;padding:28px 32px 20px}
+.page-eyebrow{margin:0 0 10px 3px;color:#827b94;font-size:10px;font-weight:850;letter-spacing:1.6px;text-transform:uppercase}
+.encabezado{position:relative;isolation:isolate;display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;overflow:hidden;margin-bottom:18px;padding:22px 25px;border:1px solid rgba(255,255,255,.15);border-radius:21px;background:linear-gradient(115deg,#38294f 0%,#59427e 52%,#7960bd 100%);box-shadow:0 15px 36px rgba(66,48,105,.18)}
+.encabezado:before,.encabezado:after{content:"";position:absolute;z-index:-1;border:1px solid rgba(255,255,255,.10);border-radius:50%;pointer-events:none}
+.encabezado:before{width:360px;height:360px;right:10%;top:-245px;background:rgba(255,255,255,.035)}
+.encabezado:after{width:230px;height:230px;right:-65px;bottom:-160px;background:rgba(255,255,255,.05)}
+.marca{display:flex;align-items:center;gap:17px;min-width:0}
+.logo{width:72px;height:72px;flex:0 0 72px;object-fit:contain;background:#fff;border:1px solid rgba(255,255,255,.8);border-radius:16px;padding:4px;box-shadow:0 8px 20px rgba(20,12,34,.16)}
+.marca h1{margin:0 0 5px;color:#fff;font-size:clamp(20px,2vw,28px);line-height:1.18;letter-spacing:-.8px;font-weight:800}
+.marca p{margin:0;color:#e3ddef;font-size:12px}
+.estado-conexion{display:inline-flex;align-items:center;gap:9px;padding:10px 14px;border:1px solid rgba(255,255,255,.20);border-radius:11px;background:rgba(255,255,255,.12);color:#fff;font-size:10px;font-weight:750;backdrop-filter:blur(8px)}
+.punto{width:8px;height:8px;border-radius:50%;background:#64dda0;box-shadow:0 0 0 4px rgba(100,221,160,.14)}
+.punto.error{background:#ff969d;box-shadow:0 0 0 4px rgba(255,150,157,.14)}
+.aviso{margin:0 0 15px;padding:13px 16px;border:1px solid #e7e0f5;border-left:4px solid #8a70d9;border-radius:12px;background:linear-gradient(100deg,#fff 0%,#faf8ff 100%);color:#706a7d;font-size:11px;line-height:1.65;box-shadow:0 5px 18px rgba(46,35,75,.035)}
+.aviso strong{color:var(--plum-2)}
+.aviso code{padding:2px 5px;border-radius:5px;background:#f0ecfa;color:#6047a2;font-size:10px}
+.aviso.error{border-color:#f0d5d8;border-left-color:var(--red);background:var(--red-soft);color:#91434a}
+.estadisticas{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:12px;margin:0 0 19px}
+.tarjeta-estadistica{position:relative;min-width:0;overflow:hidden;padding:16px 16px 15px;border:1px solid #ebe7f1;border-radius:15px;background:var(--surface);box-shadow:var(--shadow);transition:transform .2s,box-shadow .2s,border-color .2s}
+.tarjeta-estadistica:before{content:"";position:absolute;top:0;left:0;width:100%;height:3px;background:linear-gradient(90deg,#8066d4,#b4a2f1);opacity:.85}
+.tarjeta-estadistica:hover{transform:translateY(-3px);border-color:#d9cff3;box-shadow:var(--shadow-hover)}
+.tarjeta-estadistica:nth-child(2){background:linear-gradient(145deg,#f5f1ff,#fff 72%)}
+.tarjeta-estadistica:nth-child(2):before{background:linear-gradient(90deg,#6545c6,#b59cf3)}
+.tarjeta-pendiente:before{background:linear-gradient(90deg,#d18b58,#f1c28f)}
+.estadistica-etiqueta{color:#777187;font-size:10px;font-weight:750;line-height:1.4}
+.estadistica-numero{margin-top:8px;color:#3c2d59;font-size:27px;font-weight:850;line-height:1.1;letter-spacing:-.8px;font-variant-numeric:tabular-nums}
+.estadistica-descripcion{margin-top:6px;color:#9690a2;font-size:9px;line-height:1.45}
+.seccion-titulo{margin:0 0 13px;color:var(--plum);font-size:17px;font-weight:800;letter-spacing:-.35px}
+.panel{min-width:0;border:1px solid #e9e5ef;border-radius:18px;background:var(--surface);box-shadow:var(--shadow)}
+.catalogo-panel{margin:0 0 19px;padding:20px}
+.panel-cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:15px}
+.panel-cabecera h2{margin:0 0 4px;color:#392b52;font-size:15px;font-weight:800;letter-spacing:-.2px}
+.panel-cabecera p{margin:0;color:#817b8f;font-size:10px;line-height:1.55}
+.etiqueta{display:inline-flex;align-items:center;padding:6px 10px;border:1px solid #e4def1;border-radius:8px;background:#f7f4fd;color:#674da6;font-size:9px;font-weight:800;white-space:nowrap}
+.catalogo-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.plan-card{position:relative;min-width:0;overflow:hidden;padding:17px;border:1px solid #e8e3f0;border-radius:15px;background:linear-gradient(145deg,#fff 0%,#fbfaff 100%);transition:transform .2s,border-color .2s,box-shadow .2s}
+.plan-card:before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:linear-gradient(180deg,#8b70dc,#c0b0f0)}
+.plan-card:hover{transform:translateY(-3px);border-color:#d8cdf2;box-shadow:0 12px 25px rgba(64,45,105,.08)}
+.plan-card-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.plan-card h3{margin:0;color:#3e3057;font-size:14px;font-weight:800}
+.plan-status{padding:5px 8px;border-radius:7px;background:#e9f7ef;color:#287d5a;font-size:9px;font-weight:850}
+.plan-price{margin:13px 0 2px;color:#473466;font-size:27px;font-weight:850;letter-spacing:-.9px}
+.plan-price small{margin-left:4px;color:#8b8497;font-size:10px;font-weight:550;letter-spacing:0}
+.plan-speeds{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px;padding-top:11px;border-top:1px solid #eeeaf4}
+.plan-speed{padding:7px 8px;border-radius:8px;background:#f8f6fc}
+.plan-speed small{display:block;margin-bottom:3px;color:#888196;font-size:9px}
+.plan-speed strong{color:#3e3450;font-size:11px}
+.dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 315px;gap:17px;align-items:start}
+.directorio-section{min-width:0}
+.panel-clientes{padding:19px}
+.panel-directorio-cabecera{align-items:center;margin-bottom:14px}
+.barra-busqueda{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:12px}
+.buscador{position:relative;flex:1;min-width:210px}
+.buscador:before{content:"⌕";position:absolute;top:50%;left:13px;transform:translateY(-54%);color:#8b7cae;font-size:19px;pointer-events:none}
+.buscador input{width:100%;padding:12px 14px 12px 38px;border:1px solid #e2dcea;border-radius:11px;outline:none;background:#fbfaff;color:var(--ink);font-size:11px;transition:border-color .2s,box-shadow .2s,background .2s}
+.buscador input:focus{border-color:#9b83df;background:#fff;box-shadow:0 0 0 4px rgba(132,105,211,.12)}
+.buscador input::placeholder{color:#a19aac}
+.contador{color:#817b8e;font-size:10px;font-weight:650;white-space:nowrap}
+.boton{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:9px 13px;border:1px solid transparent;border-radius:9px;font-size:10px;font-weight:800;transition:transform .16s,background .16s,border-color .16s,box-shadow .16s}
+.boton:active{transform:translateY(1px)}
+.boton-rosa{background:linear-gradient(135deg,#7054c7,#8a6edc);color:#fff;box-shadow:0 5px 12px rgba(112,84,199,.18)}
+.boton-rosa:hover:not(:disabled){background:linear-gradient(135deg,#6044b5,#795bce);box-shadow:0 7px 16px rgba(112,84,199,.25)}
+.boton-secundario{border-color:#e3ddec;background:#faf9fd;color:#5c4d78}
+.boton-secundario:hover:not(:disabled){border-color:#cfc2ec;background:#f1edfa}
+.filtros-rapidos{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 13px}
+.filtro-rapido{display:inline-flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid #e9e5ef;border-radius:9px;background:#fff;color:#817b8f;font-size:10px;font-weight:700;transition:all .16s}
+.filtro-rapido:hover{border-color:#cbbcf0;background:#f8f5ff;color:#5b438f}
+.filtro-rapido.activo{border-color:#7054c7;background:linear-gradient(120deg,#7054c7,#8469d6);color:#fff;box-shadow:0 4px 11px rgba(112,84,199,.16)}
+.filtro-cantidad{display:inline-flex;min-width:19px;justify-content:center;padding:2px 5px;border-radius:6px;background:#f0edf6;color:#675b7d;font-size:9px}
+.filtro-rapido.activo .filtro-cantidad{background:rgba(255,255,255,.18);color:#fff}
+.tabla-contenedor{overflow:auto;overscroll-behavior-x:contain;border:1px solid #e9e5ef;border-radius:12px;background:#fff;scrollbar-color:#b9a8e9 #f4f1f9;scrollbar-width:thin}
+.tabla-contenedor::-webkit-scrollbar{height:9px;width:9px}
+.tabla-contenedor::-webkit-scrollbar-track{background:#f4f1f9}
+.tabla-contenedor::-webkit-scrollbar-thumb{background:#b9a8e9;border:2px solid #f4f1f9;border-radius:10px}
+table{width:100%;min-width:1120px;border-collapse:separate;border-spacing:0}
+thead{position:sticky;top:0;background:#45345f;color:#fff}
+th{padding:12px 10px;text-align:left;color:#fff;font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.55px;white-space:nowrap}
+td{padding:12px 10px;border-bottom:1px solid #f0edf4;color:#514b5d;font-size:10px;vertical-align:middle;overflow-wrap:anywhere}
+tbody tr{transition:background .15s}
+tbody tr:nth-child(even){background:#fcfbfe}
+tbody tr:hover{background:#f5f1fd}
+tbody tr:last-child td{border-bottom:0}
+.usuario-nombre{font-size:11px;font-weight:800;color:#30283e}
+.usuario-subtexto{margin-top:4px;color:#91899d;font-size:9px}
+.perfil-etiqueta{display:inline-block;padding:5px 8px;border:1px solid #e8e1f5;border-radius:7px;background:#f3effb;color:#604b91;font-size:9px;font-weight:800}
+.estado{display:inline-block;padding:5px 8px;border-radius:7px;font-size:9px;font-weight:800;white-space:nowrap}
+.estado.activo,.estado.relacionado{background:#e8f6ee;color:#287a57}
+.estado.inactivo,.estado.pendiente{background:#fff0f0;color:#aa5056}
+.controles-tabla{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:13px;padding-top:13px;border-top:1px solid #eeeaf4}
+.desplazamiento-tabla{display:flex;align-items:center;gap:7px}
+.ayuda-desplazamiento{margin-right:3px;color:#858094;font-size:9px}
+.boton-flecha-tabla{width:33px;height:33px;border:1px solid #e4deed;border-radius:9px;background:#fff;color:#5e4c82;font-weight:800;transition:all .15s}
+.boton-flecha-tabla:hover:not(:disabled){background:#f2eefb;border-color:#cbbdf0}
+.paginacion{display:flex;align-items:center;justify-content:flex-end;gap:12px;flex-wrap:wrap;margin-left:auto}
+.paginacion-listado{margin:14px 0 4px;width:100%;justify-content:space-between;padding:10px 2px;border-top:1px solid #eeeaf3}
+.paginacion-resumen{color:#858094;font-size:9px}
+.paginacion-controles{display:flex;align-items:center;gap:7px}
+.boton-paginacion{min-height:33px;padding:8px 11px;border:1px solid #e6e1ee;border-radius:9px;background:#fff;color:#5d4d7a;font-size:9px;font-weight:750;transition:all .15s}
+.boton-paginacion:hover:not(:disabled){background:#f5f1fd;border-color:#cbbdf0}
+.boton-paginacion-principal{border-color:#7054c7;background:#7054c7;color:#fff}
+.boton-paginacion-principal:hover:not(:disabled){background:#5e43b2}
+.pagina-indicador{min-width:78px;color:#65577d;font-size:9px;text-align:center;font-weight:800}
+.insights-column{display:grid;gap:15px;min-width:0}
+.insight-panel{padding:17px}
+.insight-panel .panel-cabecera{margin-bottom:12px}
+.insight-panel .panel-cabecera h2{font-size:13px}
+.grafica-contenedor{position:relative;height:255px;padding:5px 0}
+.activity-empty{display:flex;gap:11px;align-items:flex-start;padding:14px;border:1px dashed #dcd4eb;border-radius:11px;background:#faf8fe}
+.activity-mark{width:32px;height:32px;flex:0 0 32px;display:grid;place-items:center;border-radius:9px;background:#eee8fa;color:#6b50b2;font-size:15px;font-weight:800}
+.activity-empty strong{display:block;margin-bottom:4px;color:#423357;font-size:10px}
+.activity-empty p{margin:0;color:#827b90;font-size:9px;line-height:1.6}
+.pie{padding:21px 0 5px;color:#928ca0;text-align:center;font-size:9px}
+.directorio-nota{margin:0 0 13px;padding:10px 12px;border:1px solid #e8e2f2;border-radius:9px;background:#faf8fe;color:#81798f;font-size:9px;line-height:1.55}
+.empty-copy{margin:9px 0;color:#847d91;font-size:10px}
+.sin-resultados{text-align:center;padding:25px!important;color:#8b8498!important}
+.modal{position:fixed;inset:0;z-index:1000;display:none;align-items:center;justify-content:center;padding:18px;background:rgba(30,22,43,.66);backdrop-filter:blur(7px)}
+.modal.abierto{display:flex}
+.modal-contenido{width:min(940px,100%);max-height:92vh;overflow-y:auto;border:1px solid rgba(255,255,255,.65);border-radius:20px;background:#fff;box-shadow:0 28px 80px rgba(21,13,34,.3)}
+.modal-cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:21px 23px;border-bottom:1px solid rgba(255,255,255,.12);background:linear-gradient(115deg,#38294f,#7054a8);color:#fff}
+.modal-cabecera h2{margin:0 0 5px;font-size:18px;letter-spacing:-.3px}
+.modal-cabecera p{margin:0;color:#e5def1;font-size:10px;line-height:1.55}
+.modal-cerrar{width:34px;height:34px;border:1px solid rgba(255,255,255,.24);border-radius:9px;background:rgba(255,255,255,.11);color:#fff;font-size:21px;transition:background .15s}
+.modal-cerrar:hover{background:rgba(255,255,255,.22)}
+.modal-cuerpo{padding:22px}
+.informacion-cliente{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:21px}
+.dato-cliente{min-width:0;padding:12px;border:1px solid #eae5f1;border-radius:11px;background:linear-gradient(145deg,#fff,#faf8fe)}
+.dato-cliente small{display:block;margin-bottom:5px;color:#898296;font-size:8px;font-weight:850;letter-spacing:.6px;text-transform:uppercase}
+.dato-cliente strong{display:block;overflow-wrap:anywhere;color:#342944;font-size:10px}
+.titulo-perfiles{margin:0 0 11px;color:#3d2e57;font-size:14px;font-weight:800}
+.perfiles-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.perfil-card{position:relative;padding:15px;border:1px solid #e8e2f0;border-radius:11px;background:#fff;text-align:left;transition:all .17s}
+.perfil-card:hover{transform:translateY(-2px);border-color:#bca9ec;background:#faf8ff;box-shadow:0 8px 18px rgba(71,51,116,.08)}
+.perfil-card.seleccionado{border:2px solid #7658cf;background:#f5f1ff}
+.perfil-card.es-perfil-actual{border:2px solid #70b58d;background:#eff9f2}
+.perfil-card strong{display:block;margin-bottom:6px;color:#342944;font-size:12px}
+.perfil-card span{display:block;margin-top:4px;color:#837c91;font-size:9px}
+.perfil-actual-texto{min-height:14px;color:#287a57!important;font-weight:800}
+.comparacion-perfiles{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-top:17px}
+.comparacion-item{padding:14px;border:1px solid #e9e4ef;border-radius:11px}
+.comparacion-item.actual{border-color:#cce5d5;background:#f0f9f3}
+.comparacion-item.nuevo{border-color:#e4dcf5;background:#f8f5fe}
+.comparacion-item small{display:block;margin-bottom:6px;color:#81798e;font-size:8px;font-weight:850;text-transform:uppercase;letter-spacing:.5px}
+.comparacion-item strong{display:block;overflow-wrap:anywhere;color:#45335f;font-size:13px}
+.comparacion-item p{margin:5px 0 0;color:#81798e;font-size:9px}
+.mensaje-solicitud{display:none;white-space:pre-line;margin-top:15px;padding:13px;border:1px solid #e4dcf2;border-radius:10px;background:#f8f5fe;color:#5e4a88;font-size:10px;line-height:1.6}
+.mensaje-solicitud.visible{display:block}
+.modal-pie{display:flex;justify-content:flex-end;flex-wrap:wrap;gap:8px;padding:15px 22px;border-top:1px solid #ece8f2;background:#faf9fc}
+@media(max-width:1550px){.estadisticas{grid-template-columns:repeat(3,minmax(0,1fr))}.dashboard-grid{grid-template-columns:minmax(0,1fr) 295px}}
+@media(max-width:1180px){.app-shell{grid-template-columns:220px minmax(0,1fr)}.dashboard-grid{grid-template-columns:1fr}.insights-column{grid-template-columns:repeat(2,minmax(0,1fr))}.grafica-contenedor{height:230px}.contenedor{padding:23px}}
+@media(max-width:900px){.app-shell{display:block}.sidebar{position:relative;height:auto;padding:13px 16px;display:block;overflow:visible}.sidebar-brand{padding:0 3px 11px;border:0}.sidebar-brand small{display:none}.sidebar-label,.sidebar-spacer,.sidebar-status{display:none}.sidebar-nav{display:flex;align-items:flex-start;gap:14px;overflow-x:auto;padding:4px 0 7px;scrollbar-width:thin}.nav-group{display:flex;flex:0 0 auto;flex-direction:column;gap:4px}.nav-group-label{padding:0 8px 2px;font-size:8px}.nav-link{flex:0 0 auto;padding:9px 11px;font-size:10px}.nav-icon{font-size:14px}.contenedor{padding:19px}.dashboard-grid{grid-template-columns:1fr}}
+@media(max-width:640px){.contenedor{padding:12px}.page-eyebrow{font-size:9px}.encabezado{padding:15px;gap:13px;border-radius:16px}.logo{width:58px;height:58px;flex-basis:58px;border-radius:12px}.marca{gap:11px}.marca h1{font-size:18px}.marca p{font-size:10px}.estado-conexion{font-size:9px;padding:8px 10px}.estadisticas{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.tarjeta-estadistica{padding:13px}.estadistica-numero{font-size:23px}.catalogo-panel,.panel-clientes,.insight-panel{padding:13px}.catalogo-grid{grid-template-columns:1fr}.insights-column{grid-template-columns:1fr}.informacion-cliente{grid-template-columns:repeat(2,minmax(0,1fr))}.perfiles-grid{grid-template-columns:1fr 1fr}.comparacion-perfiles{grid-template-columns:1fr}.controles-tabla{align-items:stretch}.desplazamiento-tabla{justify-content:flex-end}.paginacion{width:100%;justify-content:space-between;margin-left:0}.paginacion-resumen{width:100%}.paginacion-controles{width:100%;justify-content:space-between}.modal{padding:8px}.modal-cuerpo{padding:14px}.modal-pie{padding:12px}}
+@media(max-width:390px){.marca h1{font-size:16px}.marca p{font-size:9px}.informacion-cliente{grid-template-columns:1fr}.perfiles-grid{grid-template-columns:1fr}.filtro-rapido{padding:7px 8px;font-size:9px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
+
+
+/* Navegación por módulos */
+.module-placeholder{display:none;min-height:340px;padding:24px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow)}
+.module-placeholder h2{margin:0 0 8px;color:var(--plum);font-size:20px}
+.module-placeholder>p{max-width:760px;margin:0 0 18px;color:var(--muted);font-size:12px;line-height:1.7}
+.module-status{padding:15px;border:1px solid #eadff8;border-radius:12px;background:#faf7ff;color:#594978}
+.module-status strong{display:block;margin-bottom:4px;color:#45345f;font-size:12px}
+.module-status span{font-size:11px;line-height:1.6}
+.module-steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:18px}
+.module-step{padding:14px;border:1px solid var(--line);border-radius:11px;background:#fff}
+.module-step b{display:block;margin-bottom:6px;color:var(--plum);font-size:11px}
+.module-step small{color:var(--muted);font-size:10px;line-height:1.55}
+.module-tag{display:inline-flex;margin-bottom:12px;padding:5px 9px;border-radius:7px;background:#f0ecfb;color:#624b9a;font-size:9px;font-weight:800;text-transform:uppercase}
+
+body[data-modulo="inicio"] #catalogo,
+body[data-modulo="inicio"] .dashboard-grid,
+body[data-modulo="inicio"] .module-placeholder{display:none!important}
+
+body[data-modulo="clientes"] #inicio,
+body[data-modulo="clientes"] .estadisticas,
+body[data-modulo="clientes"] #catalogo,
+body[data-modulo="clientes"] .module-placeholder{display:none!important}
+body[data-modulo="clientes"] .dashboard-grid{display:block!important}
+body[data-modulo="clientes"] .insights-column{display:none!important}
+
+body[data-modulo="catalogo"] #inicio,
+body[data-modulo="catalogo"] .estadisticas,
+body[data-modulo="catalogo"] .dashboard-grid,
+body[data-modulo="catalogo"] .module-placeholder{display:none!important}
+body[data-modulo="catalogo"] #catalogo{display:block!important}
+
+body[data-modulo="perfiles"] #inicio,
+body[data-modulo="perfiles"] .estadisticas,
+body[data-modulo="perfiles"] #catalogo,
+body[data-modulo="perfiles"] .module-placeholder{display:none!important}
+body[data-modulo="perfiles"] .dashboard-grid{display:grid!important;grid-template-columns:1fr!important}
+body[data-modulo="perfiles"] .directorio-section,
+body[data-modulo="perfiles"] #actividad{display:none!important}
+body[data-modulo="perfiles"] .insights-column{display:grid!important;grid-template-columns:1fr!important}
+
+body[data-modulo="solicitudes"] #inicio,
+body[data-modulo="solicitudes"] .estadisticas,
+body[data-modulo="solicitudes"] #catalogo,
+body[data-modulo="solicitudes"] .dashboard-grid,
+body[data-modulo="solicitudes"] #moduloHistorial{display:none!important}
+body[data-modulo="solicitudes"] #moduloSolicitudes{display:block!important}
+
+body[data-modulo="historial"] #inicio,
+body[data-modulo="historial"] .estadisticas,
+body[data-modulo="historial"] #catalogo,
+body[data-modulo="historial"] .dashboard-grid,
+body[data-modulo="historial"] #moduloSolicitudes{display:none!important}
+body[data-modulo="historial"] #moduloHistorial{display:block!important}
+
+body[data-modulo="clientes"] .directorio-section{display:block!important}
+
+body[data-modulo="dhcp"] #inicio,
+body[data-modulo="dhcp"] .estadisticas,
+body[data-modulo="dhcp"] #catalogo,
+body[data-modulo="dhcp"] .dashboard-grid,
+body[data-modulo="dhcp"] #moduloSolicitudes,
+body[data-modulo="dhcp"] #moduloHistorial{display:none!important}
+body[data-modulo="dhcp"] #moduloDhcp{display:block!important}
+
+
+body[data-modulo="centro-radius"] #inicio,
+body[data-modulo="centro-radius"] .estadisticas,
+body[data-modulo="centro-radius"] #catalogo,
+body[data-modulo="centro-radius"] .dashboard-grid,
+body[data-modulo="centro-radius"] #moduloDhcp,
+body[data-modulo="centro-radius"] #moduloSolicitudes,
+body[data-modulo="centro-radius"] #moduloHistorial,
+body[data-modulo="centro-radius"] .module-placeholder:not(#moduloCentroRadius){display:none!important}
+body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
+
+.radius-panel{min-width:0}
+.radius-cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.radius-cabecera h2{margin:0 0 6px;color:var(--plum);font-size:20px}
+.radius-cabecera p{margin:0;color:var(--muted);font-size:11px}
+.radius-resumen{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 18px}
+.radius-nas-card{padding:18px;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:var(--shadow)}
+.radius-nas-top{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.radius-nas-tipo{color:var(--muted);font-size:10px;font-weight:800;letter-spacing:.7px;text-transform:uppercase}
+.radius-nas-card h3{margin:0 0 4px;color:var(--plum);font-size:19px}
+.radius-nas-ip{color:var(--muted);font-size:10px}
+.radius-nas-stats{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:15px}
+.radius-nas-stat{padding:10px;border-radius:9px;background:var(--surface-soft)}
+.radius-nas-stat small{display:block;color:var(--muted);font-size:9px}
+.radius-nas-stat strong{display:block;margin-top:4px;color:var(--plum);font-size:19px;font-variant-numeric:tabular-nums}
+.radius-ultima{margin-top:12px;padding-top:11px;border-top:1px solid var(--line);font-size:10px;line-height:1.55;color:var(--muted)}
+.radius-ultima strong{color:var(--ink)}
+.radius-estado{display:inline-flex;align-items:center;padding:5px 9px;border-radius:999px;font-size:9px;font-weight:800;background:#eaf3ed;color:#3f7658}
+.radius-estado.sin-registros{background:#fff4df;color:#8b681f}
+.radius-nota{margin:0 0 16px;padding:12px 14px;border:1px solid #e8e2f2;border-radius:10px;background:#faf8fe;color:#746d82;font-size:10px;line-height:1.6}
+.radius-filtros{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px 0 12px}
+.radius-filtros-grupo{display:flex;gap:7px;flex-wrap:wrap}
+.radius-filtro{display:inline-flex;align-items:center;padding:9px 13px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--plum);font-size:10px;font-weight:750;text-decoration:none}
+.radius-filtro.activo{border-color:var(--plum-3);background:var(--lavender-pale);box-shadow:inset 0 0 0 1px var(--plum-3)}
+.radius-tabla table{min-width:1120px}
+.radius-tabla td{vertical-align:top}
+.radius-secundario{display:block;margin-top:3px;color:var(--muted);font-size:9px;line-height:1.45}
+.radius-vacio{padding:22px;border:1px dashed var(--line-strong);border-radius:11px;background:var(--surface-soft);color:var(--muted);font-size:11px}
+@media(max-width:720px){.radius-resumen{grid-template-columns:1fr}.radius-nas-card{padding:15px}.radius-panel{padding:16px}.radius-filtros{align-items:flex-start}}
+
+.dhcp-panel{min-width:0}
+.dhcp-resumen{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin:0 0 16px}
+.dhcp-metrica{padding:15px;border:1px solid var(--line);border-radius:13px;background:#fff;box-shadow:var(--shadow)}
+.dhcp-metrica small{display:block;color:var(--muted);font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:.5px}
+.dhcp-metrica strong{display:block;margin-top:7px;color:var(--plum);font-size:23px;font-weight:850;font-variant-numeric:tabular-nums}
+.dhcp-tools{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0}
+.dhcp-buscador{flex:1;min-width:220px}
+.dhcp-buscador input{width:100%;padding:11px 13px;border:1px solid var(--line-strong);border-radius:10px;background:#fff;color:var(--ink);font:inherit;font-size:11px}
+.dhcp-tabla table{min-width:1250px}
+.dhcp-subtexto{display:block;margin-top:3px;color:var(--muted);font-size:9px}
+.dhcp-nota{margin:12px 0 0;padding:11px 13px;border:1px solid #e8e2f2;border-radius:9px;background:#faf8fe;color:#746d82;font-size:10px;line-height:1.6}
+@media(max-width:720px){.dhcp-resumen{grid-template-columns:repeat(2,minmax(0,1fr))}.dhcp-panel{padding:16px}}
+@media(max-width:720px){
+    .module-placeholder{padding:16px}
+    .module-steps{grid-template-columns:1fr 1fr}
+}
+
+
+.historial-panel{min-width:0}
+.historial-cabecera{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.historial-cabecera h2{margin:0 0 6px;color:var(--plum);font-size:20px}
+.historial-cabecera p{margin:0;color:var(--muted);font-size:11px}
+.historial-resumen{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:var(--surface-soft);font-size:10px;color:var(--muted)}
+.historial-resumen strong{color:var(--plum)}
+.historial-tabla table{min-width:1100px}
+.historial-tabla td{vertical-align:top;max-width:300px}
+.historial-subtexto{margin-top:4px;color:var(--muted);font-size:9px;overflow-wrap:anywhere}
+.historial-vacio{padding:20px;border:1px dashed var(--line-strong);border-radius:10px;background:var(--surface-soft);color:var(--plum)}
+.pppoe-mini-resumen{display:flex;gap:8px 16px;flex-wrap:wrap;margin:0 0 16px;padding:11px 14px;border:1px solid var(--line);border-radius:11px;background:var(--surface-soft);color:var(--muted);font-size:10px;line-height:1.5}.pppoe-mini-resumen strong{color:var(--plum);font-variant-numeric:tabular-nums}.estado.estado-ok{background:#eaf3ed;color:#3f7658}
+.estado.estado-pendiente{background:#fff4df;color:#8b681f}
+.estado.estado-error{background:#f8eeee;color:#a44f4f}
+
+
+.solicitud-panel{min-width:0}
+.solicitud-cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.solicitud-cabecera h2{margin:0 0 6px;color:var(--plum);font-size:20px}
+.solicitud-cabecera p{margin:0;color:var(--muted);font-size:11px}
+.solicitud-form{display:grid;grid-template-columns:1fr 1fr;gap:15px;padding:18px;border:1px solid var(--line);border-radius:12px;background:#fff}
+.solicitud-campo{display:grid;align-content:start;gap:7px;min-width:0}
+.solicitud-campo label{color:var(--plum);font-size:11px;font-weight:750}
+.solicitud-campo input,.solicitud-campo select,.solicitud-campo textarea{width:100%;min-width:0;padding:11px 12px;border:1px solid var(--line-strong);border-radius:9px;background:#fff;color:var(--ink);font:inherit;font-size:11px}
+.solicitud-campo input:focus,.solicitud-campo select:focus,.solicitud-campo textarea:focus{outline:none;border-color:var(--plum-3);box-shadow:0 0 0 3px rgba(102,91,114,.1)}
+.solicitud-campo small{color:var(--muted);font-size:9px;line-height:1.5}
+.solicitud-campo-completo{grid-column:1/-1}
+.solicitud-resumen{display:grid;gap:4px;padding:13px;border:1px solid var(--line);border-radius:9px;background:var(--lavender-pale);color:var(--muted);font-size:10px;line-height:1.6}
+.solicitud-resumen strong{color:var(--plum)}
+.solicitud-acciones{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.solicitud-acciones span{color:var(--muted);font-size:10px}
+.solicitud-mensaje{display:grid;gap:4px;margin-bottom:14px;padding:13px;border-radius:9px;font-size:10px;line-height:1.5}
+.solicitud-mensaje.correcto{border:1px solid #c9ded0;background:#eaf3ed;color:#3f7658}
+.solicitud-mensaje.error{border:1px solid #e8cdcd;background:#f8eeee;color:#954f4f}
+@media(max-width:640px){.solicitud-form{grid-template-columns:1fr;padding:13px}.solicitud-campo-completo{grid-column:auto}}
+
+
+
+/* Directorio PPPoE: columnas con medidas estables para evitar que los datos técnicos se apilen. */
+.ayuda-tabla-clientes {
+    margin: 0 0 8px;
+    color: #847c93;
+    font-size: 9px;
+    line-height: 1.5;
+}
+.panel-clientes .tabla-contenedor {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+.panel-clientes .tabla-contenedor table {
+    width: 100%;
+    min-width: 1620px;
+    table-layout: fixed;
+    border-collapse: separate;
+}
+.panel-clientes .tabla-contenedor th,
+.panel-clientes .tabla-contenedor td {
+    box-sizing: border-box;
+    padding: 12px 11px;
+}
+.panel-clientes .tabla-contenedor th:nth-child(1),
+.panel-clientes .tabla-contenedor td:nth-child(1) { width: 175px; }
+.panel-clientes .tabla-contenedor th:nth-child(2),
+.panel-clientes .tabla-contenedor td:nth-child(2) { width: 100px; }
+.panel-clientes .tabla-contenedor th:nth-child(3),
+.panel-clientes .tabla-contenedor td:nth-child(3) { width: 160px; }
+.panel-clientes .tabla-contenedor th:nth-child(4),
+.panel-clientes .tabla-contenedor td:nth-child(4) { width: 105px; }
+.panel-clientes .tabla-contenedor th:nth-child(5),
+.panel-clientes .tabla-contenedor td:nth-child(5) { width: 110px; }
+.panel-clientes .tabla-contenedor th:nth-child(6),
+.panel-clientes .tabla-contenedor td:nth-child(6) { width: 160px; }
+.panel-clientes .tabla-contenedor th:nth-child(7),
+.panel-clientes .tabla-contenedor td:nth-child(7) { width: 130px; }
+.panel-clientes .tabla-contenedor th:nth-child(8),
+.panel-clientes .tabla-contenedor td:nth-child(8) { width: 155px; }
+.panel-clientes .tabla-contenedor th:nth-child(9),
+.panel-clientes .tabla-contenedor td:nth-child(9) { width: 170px; }
+.panel-clientes .tabla-contenedor th:nth-child(10),
+.panel-clientes .tabla-contenedor td:nth-child(10) { width: 145px; }
+.panel-clientes .tabla-contenedor th:nth-child(11),
+.panel-clientes .tabla-contenedor td:nth-child(11) { width: 115px; }
+.panel-clientes .tabla-contenedor th:nth-child(12),
+.panel-clientes .tabla-contenedor td:nth-child(12) { width: 95px; }
+
+/* Campos técnicos en una sola línea: IP, MAC, perfil, velocidad e identificador. */
+.panel-clientes .tabla-contenedor td:nth-child(1),
+.panel-clientes .tabla-contenedor td:nth-child(2),
+.panel-clientes .tabla-contenedor td:nth-child(4),
+.panel-clientes .tabla-contenedor td:nth-child(5),
+.panel-clientes .tabla-contenedor td:nth-child(6),
+.panel-clientes .tabla-contenedor td:nth-child(7),
+.panel-clientes .tabla-contenedor td:nth-child(8),
+.panel-clientes .tabla-contenedor td:nth-child(11),
+.panel-clientes .tabla-contenedor td:nth-child(12) {
+    white-space: nowrap;
+    overflow-wrap: normal;
+    word-break: normal;
+}
+.panel-clientes .tabla-contenedor td:nth-child(3),
+.panel-clientes .tabla-contenedor td:nth-child(9),
+.panel-clientes .tabla-contenedor td:nth-child(10) {
+    white-space: normal;
+    overflow-wrap: break-word;
+    word-break: normal;
+    line-height: 1.5;
+}
+.panel-clientes .tabla-contenedor td:nth-child(7),
+.panel-clientes .tabla-contenedor td:nth-child(8) {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .1px;
+}
+.panel-clientes .tabla-contenedor .perfil-etiqueta {
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.4;
+}
+.panel-clientes .tabla-contenedor .estado {
+    max-width: 100%;
+    white-space: normal;
+    line-height: 1.4;
+}
+.panel-clientes .tabla-contenedor .boton-ver-planes {
+    width: 100%;
+    min-width: 82px;
+    min-height: 34px;
+    padding: 8px 10px;
+    white-space: nowrap;
+}
+@media (max-width: 720px) {
+    .panel-clientes .tabla-contenedor table {
+        width: 100%;
+        min-width: 1620px;
+    }
+    .panel-clientes .tabla-contenedor th,
+    .panel-clientes .tabla-contenedor td {
+        padding: 10px 9px;
+    }
+}
+
+</style>
+
+</head>
+
+<body data-modulo="<?= escapar($moduloActual) ?>">
+<div class="app-shell">
+    <aside class="sidebar" aria-label="Navegación principal">
+        <div class="sidebar-brand">
+            <div class="brand-monogram">UBB</div>
+            <div><strong>UBB COMUNICACIONES</strong><small>Gestión de red</small></div>
+        </div>
+        <div class="sidebar-label">Navegación principal</div>
+        <nav class="sidebar-nav" aria-label="Módulos del sistema">
+            <div class="nav-group">
+                <span class="nav-group-label">General</span>
+                <a class="nav-link<?= $moduloActual === 'inicio' ? ' active' : '' ?>" href="?modulo=inicio"><span class="nav-icon">⌂</span>Inicio</a>
+            </div>
+            <div class="nav-group">
+                <span class="nav-group-label">Clientes y servicios</span>
+                <a class="nav-link<?= $moduloActual === 'clientes' ? ' active' : '' ?>" href="?modulo=clientes"><span class="nav-icon">◉</span>Clientes PPPoE</a>
+                <a class="nav-link<?= $moduloActual === 'dhcp' ? ' active' : '' ?>" href="?modulo=dhcp"><span class="nav-icon">⌁</span>Equipos DHCP</a>
+            </div>
+            <div class="nav-group">
+                <span class="nav-group-label">Planes y perfiles</span>
+                <a class="nav-link<?= $moduloActual === 'catalogo' ? ' active' : '' ?>" href="?modulo=catalogo"><span class="nav-icon">◇</span>Catálogo comercial</a>
+                <a class="nav-link<?= $moduloActual === 'perfiles' ? ' active' : '' ?>" href="?modulo=perfiles"><span class="nav-icon">≋</span>Perfiles MikroTik</a>
+            </div>
+            <div class="nav-group">
+                <span class="nav-group-label">Monitoreo y control</span>
+                <a class="nav-link<?= $moduloActual === 'centro-radius' ? ' active' : '' ?>" href="?modulo=centro-radius"><span class="nav-icon">◉</span>Centro RADIUS</a>
+                <a class="nav-link<?= $moduloActual === 'radius-dhcp' ? ' active' : '' ?>" href="?modulo=radius-dhcp"><span class="nav-icon">⇄</span>Clientes DHCP RADIUS</a>
+                <a class="nav-link<?= $moduloActual === 'radius-pppoe' ? ' active' : '' ?>" href="?modulo=radius-pppoe"><span class="nav-icon">⇆</span>Clientes PPPoE RADIUS</a>
+                <a class="nav-link<?= $moduloActual === 'historial' || $moduloActual === 'solicitudes' ? ' active' : '' ?>" href="?modulo=historial"><span class="nav-icon">◷</span>Gestión de cambios</a>
+            </div>
+        </nav>
+        <div class="sidebar-spacer"></div>
+        <div class="sidebar-status">
+            <div class="sidebar-status-title">Estado de conexiones</div>
+            <div class="status-line"><span class="status-dot<?= $errorConexion ? ' error' : '' ?>"></span><div>MikroTik<small><?= $errorConexion ? 'Consulta no disponible' : 'Consulta disponible' ?></small></div></div>
+            <div class="status-line"><span class="status-dot<?= $errorConsultaRadius ? ' error' : '' ?>"></span><div>RADIUS<small><?= $errorConsultaRadius ? 'Consulta no disponible' : 'Consulta disponible' ?></small></div></div>
+        </div>
+    </aside>
+
+    <div class="main-area">
+        <main class="contenedor">
+            <p class="page-eyebrow">Administración WISP · UBB Comunicaciones</p>
+    <header class="encabezado">
+
+        <div class="marca">
+
+            <img class="logo" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEEAAABBCAYAAACO98lFAAAcuElEQVR42sWbSYylWXbXf+fe+w1vjDkis3KorMyqrqG7y112jwu3sQxYZtMghLzAFhJCSAgkJLYsDEJiwQJ5xc6yEAsL2ULClmwsMNAttV222u3qqu6q6q6qrJyHmF+84ZvuvYfF9+JlZEZkVjU2zZNC+V7ki+/77v+e4X/+51xRVeUn8IohEmMkxtB+BhBFsBgRjFGsSUA+xcUUFGX/h/eZ/OiALLVEVRTACKN721TbIxLrQNsLuig8fPsWkzu7uCwBdTRVyRv/+hu4/xcLVlWapml/fEOIgRA8MSogaFRA2/WKQ8RgbAuOc47EJiRJSpIkGGNO32AO1OpnzqNRGd84IDeOFhpl9fwWhwHK/SMScSgQrLD5+hUq8cTbI0yWHOPzVwiCQtXUzMoC31QEr6hXQiNI6aBMiVGQJm2/HhVUUWMwDkwSiJnHJ5EyK5GkxBghcY5OnpFlOWIemYkoqFHWX7uAiGH60UNckoGCF2Xl0haHCrP9Cc5aiJFohUs/9SIP4nWK+4cYIMpfAQgaI7OyoCgLQqNorcSpQ49S/NgSK0UbQC1gwUREABFEFIioQtAMtYFoAzYxMIjooEG7nqo8wiZjsjSn1+thrW3/XgUF1l45j4TA5MYBLkmIKA3K0uVNgoVi75DMpGiMNBa23rjGQ/MR4+vbIPKXAEFhVswYTydopVA4wignjFLqJuCcweaRztAiBoIBDYFYga8FrSLaCIJBXESNR1QJ0REKA7MIOwaTZ9iliK5O8fmMaVHQyzr0+j2ss8g8Fqx+7iJGHKOPd0hdSiTSiLJyYQMlUO9MSW2KCYFoYPONl/Blg1Ye+b8JjHVdMzqa0FQeLRNkkhJmEeaLzpYc3YHDpIKIaRFrwxYxKtFDmCn1UWC2Hyn2IBQWIwZrlYgApg1qOnedpMauRewGkJUY8Qx7fXr9DmBQVRBh/wf3mF7fJU1S/DzuiDGMbt2n3JuS2AQ0IMYSZg1bv/S5Hx+E8XjMZDqhUXB1ilQCSSQfpuS9hDxPEQxPhvl2afLE71tw6iIyfRgY324IBwZjc7ARnUcuEYUYCWpILNitEtmqUFORJo7l4RousY+AeO8e4+v7pNYxzxlYUQ7vbFPtTnHGgShN8Fz62z/z6UEIIXA4GlEU1YmILSTO0Ovn1I2nKjyJcywt94lREYTGe7z39HpdQgiURYmIIctSnEvaBUq72OgjR3crDj/0mEmOpna+CAXxgEEaIYQAS0J+pSR2xxi1rAxX6HTz+feF/XfvM7u+jXMZXlqLcCqM7j5ktjshtSlVqLj0jTcwnwaApmnY29ulLMonUpaSZRl52iFLcgQoq5KjozHee4w1VHVJVZXEGNnZ2WE6K5hMp+zu7TI6OlwAoNrmquXnUy58LSO5VBNCM7ccAU3Q4Bm8Glh5XREfKd5LcLsriDHsjnYZj2cIgmpk9dXzdK+u03iPU8FEaEQZXNwgX+vQxHpxb/PJ/t+wt3dA4yPG2NPuMZnycHuXumkYDAe4JEEVrLWMRmOKWUUIkclkzGAwYGtrg83NdZxzjMdjZrPZ3OTBIKgakm7CuZ/OWX4VNAZEARNAhVB6Vq5mXPy6o3fRcPCxIdwe0iHjYHLI0WiGEUElsvbaBXpX12iaZp5NwAusXDpPd21ADA2WT8gOdd2wv39AiBERu/Cvx3iLtGlqMpkCU0QE3yjTaUGSOHq9HmVZ0u32SNOWIxweHuK9ZzgctunuBAuabw6iltVrFpdV7LzTYNRineXoRqSzFuidTzj3uiFdqtl/22NCn+TKhPFkH8Mq/aUuUZXVV88Dgcn1AxKXtDwCWLq4RR0CPoanxwTvPbt7B8QQFgv9tC9rhG63S7/fQ0TajBAD4/EEaw39fr81Q2M+gXm2QfHoQcnOdyNOUggRWQpc+JpBbIIR4fBGwf7bhu6WwPNTQqhYWhrQ7w+IqojA6Af3OLq+h0szIhFE0Cay9PrW2e6gqhwcHLYB6McEIMZIt9thMOi34KlijFCWFZPJlMlkQl3XlGUbJ571EgFVYXiuw+prhhA81jqqQ8voI8WIJUZl+UqH/mVh9gD8doKzlqOjKWVZYqRNs8PPPkf36ip1U2MQJLahxibJ2SCMRiPqukJEfmwOZUQoioKiKFpfBEKIeB+w1mKMYX9/n8PDOcif8GqBgJUrGb3nI00TyJ3l8CNlul1gjBKAlVcsrhupbif4ww7GOA4PD/C+tWRUWPvsRQZX1vB1s1ibqp4GoShKprMKMe5TFErtRR4zFREaH9nZ3Wc8nhKjsrO7R1EUbbzwHlVFo7K/v0/wof385HWeAAJg/eUOdimCVyyWnbcjo+sNfuKZPvAEFYxJaG60/CVoZDQ6mmcARVRZ+1xrEU1TY9GWxp+MCTEGtrd3CVE/hRUoNmk5vIZIDI+vwCYGK5bgA957AJIkodfLaYLHOoMxhl7eP+WKZ91bVVGB2U7Dzp+CsxDUEYO2xVcIbH7RkXQC974bMNbQeWlMEz3LSyv0ep0TcQZ23rvN9IN9Nr98+fHsMBlPCDEgYp+9fFGIhsmtCq0ieT/HbCyYMUpk+lGNGRqGWz3S1BGj4qzF4ZjslZSjGmsSim4FVrDGkC1ndJc6KC3RmvOeR1lIld6GY3qhpLjtIFPECKIOUYMvA/0tSz40FLeVapRjl2dMxmM6nQxjDAJEVdZfvYg2im/iIxC8b5jOZhgxzw6ECmLAlo63/uP3GN+ecu3nL/Par1ylmBVtyqscb/6H73L+S+v8/D/7ClEDZg5sU5cAfO+/vs/eOwVpRwlVwGUO1zVc+bktvvjLXwAjII+TbKPtL1avptzZDkgU5JgjWsPuu5F6v8HvR4xm6P0E2+viZcx0MmUwHMCcjwBsfO4SvvaPYsJkMuPTlhHK8QNKmwItRNGF4KFGwcq8hgCJhqIoKMuSJM3ZemGdr/+TnyZdUZIkZfPzq7iBRQ8t3//t63zwzeuIMBdhHhVtO3s7bO/uMIkjkrUGDaEVFuZP5bCMb1p6m4bkYoUfGfxhgiSG2aw4lY3ECEk+zw4hBMqynLuBfOpaeoGZPlkYxbZgmj+gWOHP/uw7/MZv/Ca3bt1CVVnaHLJyfojpKX/9X36Fv/FrXyW5qEhiufv2w1N01ntPWZZUZaAoa5YuWTSp2lT3yFYwiaMoBGsdKga/pxif4KNnNqvOzmgAZVkSQlzUdca0QYu/tPz4CJi6qtl+uM14fIRIayWhiSDgTMrK1jKZSzFFRNzxszy6f5ZlDAYDOp2M4WCJ/kZGMjBo4JE1qCJGqXYyZvcMLhGYJHBkwShFUZzp6q4FoZjXKUIMnm4nI00zDg9H7YVPEiaZS1tP7L0cI6qKqOB4BKKqcvXqC5w7f45XXnkFgJvfuc3RzTH5Socf/Pf3efCDA0a3ZuTncl75hWtEPS69HwXGVnNUvPds7+/i+j38viJqHmlugLEKWKIA0VIfJqQrOXVT0zQ1aZI+DsKxINpG3/ZmWZbR6XSoqpoYI03TPDNeHPMFVUiThG6vgzHyyJI0cu3Fq4+lu93bu6jU+APHm//+bWyS0MkSehtDuquDeZqcC7OqHBwczLlG67LGRqRfg3MQ7YnYcFKHVNQGwtRCY1ATKcvqFAimrhtibIOcolhrybJs4dudToa17a4+5vVGwbZKZZZEBr0eItDv98iyDEVOeJOws7PDhx9+xGjUusPP/J03+OI/fB1NIz/191/l5b97EXdBmP5wzO/+2v9g/8b+Yj2teh0w1i1cNSJIx+M6AY3y1FgmEqA06EyILlKVp+OCqaqaRS5SfUzmTtOUoijI884jS9A2hw+Xu5gkggass+RpSrfTnbtKaHP9nPSIMXzve+/wO7/zX/it3/rP3L//AFXl2tevsPJGhzd++TW+9g++xNf/+Vewa0J86Pj+73+IYGiaR5UsyFxiUVQt0UZsT4HAExHycT9ViBODIcV7T5iTtwUIx2yOuUknSbL4z263S4wRaw2dTr4w+TzP6Q06mKQlQPdv7BK8Z3l1iSzPePDxLrP9ApfYBYMyxpCmCYeHB9y7dw8RwVrL8toyxbTdnY0X1klXEtTBbLdmWk3Z3dunqutTLLKFI0AvohLa92ciYEAMOk1wwRI0LmqaRUwIMT5WKZ6s70WE1dVVRIQQPEVZgFiyNEWMsPXqBqMf3WJ2s+KPfv1NXvjyRYqjmg/+13VSTVv1Zm6mSZKQ5znPP3+Jq1dfIGpAjGE6LolNoJpUfPzmbYrdijREuqspqkLwEWPNU9pQiskDYiOqydkOoaZ9/jqSxAAC/onCzZ0MeCLSNipO1gDzz9bOhUxav0pSy6u/8BI3//g+9a5n90/HbL/5DqhgnFDojP7qxUWj5atf/TJf+tIXyfNsce27b93n4bf3+KMfvElTQ7Vfox7ssvLZX7xGJ00ZPVVzaJ/HugbjMkLtEPFPjQ0xgAYLLpydIk+C8DSh49g1iqLAh5r9vRK1ylf+8Rv88Hc/5PDeFC0EjOJWDJ/92c/y2i+93BZERkhMQpK0LlfVFTe+d4t3f/tDkr4lNr4tpq5krF7q89rfeon1l9aYTmaoxrls/6ShR1BDcAoJmFJRZ5CzspgoeIupHCapT1Wrcvfeg5OmwOb6Gs7ZT+49VDWjoxEqitQpTsCXrWbQ3+yQntjxJyvEpqmZjQrSJEOsztObYJ0jyZIFGy2Kkv2Dw2cqUEYM9YddwigFa88GYd7v6L44Jg5Lhv0B/UH/bEsAnlk86XGJLZBmKRsbG1RVzXg8YbAyxFm3YHr7B3ugluXlJUAJISyCbpKkLK2nZ3n5vFnb8nprDUZ0nrzlzLCAidhkXmdYfWqCaOOqOXOF7ulE9/QOnmyIPqKzKc4ucTQ6IklTrDFMJmOiKt7XrZagEZXI6upaK3YuNHY5WYm0AJ+4R5Zl9Pt9xuMxYtyJNH3i+yLzzPHJ+sfTttmckVLbaksfV3aKacHtt+8y2h4/xurb4GRZWlmm08lBBB8g+pYf1KHB06a87Vs7zIopZd1K4EjbSmdOLnfv76MaHwNmOBzS7w0QAWctiUvo9FNWV1dIEodqJH4CBHrMauXsbTZP7njU2PqghMVSQxN55w/fx3Tg47duU85qoipxvhthLl4aETAGS5uWrGu5uxiLqCN6y8HhmL2H+5RlRfBth1pDO88QGo/SEONxH0kIdWBpecja+gorq0tsbq6xPByS2oSN1VXW19ZJMneK0Z6RKRETn15ALeiHRqKPfPCnH3Pp9XOkgxwRaGqPhMiFly5w4doWxZFnf3tCt+842Dlg984+TeFJk4Q86+E1tNqdh+LQk3TAdARjUmZ7YzoXemgTObp9yOoLKzz88CHrF9cpD0p62ZCyGNMb5ty7fo+j3UPOvXCOYlRyuD/i/LVz7N/cZ+nFIc89f55EEkTqtu55pgAcMVbxxGdYQgSXCIf3Rnzz17/De7//cbuzc4Nq5qV2iMps19PJMrRKuPfuAzYvrpFISnfQZ/v6HlqA1rD7/ojOMEdrQ3EjcPThEYnLuPDaJuHQM7tXcONbt8nzLhc+c4G96weUY09/2OVou+Ho4YSty+e5//177H90SJ5328EOG5CxIYYIhLm4YniqLShYK63Qo3IKLdPqBqDi0VQ4+NGIDl0++t+3mO21LbIkS0h7GXfevc17334fl1t8DLjUkHQSSA2StLJcZyWnrkvqaUVnNUWsQAZNJ5Ksp9ShZv+Hh9z47gPKCvK0y+R+xc3v3yFJM9Kuoy48WdfguhnWOrJBjltNyfqGpOPorfW59b27VNMKMDR1BAnHk1BnN3FSjyYQMU90vcC0aevYBy3VzEMSqfYqPvr2x3N/Uq7+zEUOdsdsXNhE8oaiOmJWj9h6cRPjHKuXh5AYVi6v0lnJyfoZGy+tkfUcg9U+axeXWLu0Sj7sUh0FnnvpPIOtLisvbpAOMqb3CpbOr+CbgslsRDAFa5cGSBbZeHGdjRdW8DGAgaZsuPzl5+gudYlBiZU8RRvVFhwNmE5EbY0R81h9BOCyNKUqyzYMqaAiaIykacL1b93h1b/5MiYz2I7j6uuXCT4QvKczyIga6a3mxKh0uj16g8j4qCTpDxEj+FBixaFqyI0lhshSvxU7YzCs2oy6qVi6soTxETERSYXuMJt3snLMPLd3VFjZHOK959yLm9jUtYGzicTKoFbnI0F6BhCC6UeCRlKXnCKDLssSjJlPlClk3aQFJDdMbjbcevsOV798haWV4adQHT3jWxMORqOWP3QMk2KCqpInKZpAXVVkeU4dG/IsJ+0Y9o4esjQYsrY0ZLA8ZDqZkVpDmqZMjiZkWYqPniY22NzR1DVZkrfMdRIJtWCcIlFPpUaJYJwgvUCMkOXpqTTpnHM4Z/BVhCCkQ4d1hkAEo3z0zRtc/dKVpzZFHtEPJXjlcP+wHd0rZxRViSCkWUoxndHUNZ1Oh/FoTK/XY9o0pCsrGK+MD0b08g6Mxty5c4d+r0+SJnMBWAihtc524KNHnI7JsozqMEBUjJqFU58kOBLADBsk89goZFl+OkWKCHneoayOiCGQrWS4rsPXDS637L1zxMHNA1aurBBj21x9Gst0iePatau4pM282zs7bc6Psd39pqGuKra6W0wmE7rdLolzrK2voxpZWVnGWsvLL78MAsWsYGNjA+ccZVku5hyLWcFg0EcJNAcRgzsz/7fTbUqyEogScM6RZunZPCHPc+x4TAwV+VJOtpETrgdMD8qjwEffvsUXr6ycRvoMKPqD3uI3y0tDptMpxlhCVLI0Jc8yVJWVlRVijO0Qhii93qP5hePXYDBYvO90Oov3yVIbzJvSUx4axNqzi54Imgsy9ITo56MCJ81XH/EE5xydTqft63WV5ed7NBFULUna4eafPKScVIs29yc1aZ+cczxueqhqu3BVQvALJavT6dDr9X6M2ckW9HJPacpHDdsn90Q1kqx66qzAqKGTd05XVSIs8kqv10PEELRm86VVrIlIEGxiGT+c8MG3PpwPXHzyTMGnqUqPZbqNjXVWV1dPWcEz7zGneJMHAYM9AwVBo8EmAbtREdTQX17DJa4dHK0D5VHJ9MGIo+vbuBYxnXeMu0zKKSvXlumcyyl3AiYROmmP937vY65+9Qq91R7P9IonapG/+sHp9p9q4in2FGv19H0kttrrhZKYebJa8HdHHBQ11azAlx4pIz4GTFTMdLeVwDUqg+EAg8MuKec+v4UvQ2sxqeJ34Y9/8zuteRP5NOMr1lqe3uHXxcT700u/46JOH9Wt86r54E6NlsljpffiC0GQfoNs1FgNcHfC+L17TG4d0OxVULTNmcS6dlJl9y9uMNketSKGsQyHfeqq4tJXtkiWDdFHNHqSvnDvzT3+7D+9PWdn+ok7nec5xpzd5TZGWBoOnuzgPOGzrX+1NUzE1xXVuGB8a0xxW7GuJWInZgaASLQN7kKNTSJ6GPAHM1yaY5IE49yisaMqqArOBsP+WzfhC5fpby7T7XYoi4J4AS5/7Tw/+sMbdPtpy+D6OR/83g3ECF/+1Z9q7xtaDfFYIntyADTGR228k3rF2urygr7qXN9c/F0daKqKelrjJzVxWhKmNb6qiJUS6i2MW2nnJJ7UEkMgv+BhpUILj96ZYlWIJrbF01mltIjFBsveX9yCN4T+5hLLS8vsH+3z/F+7yJ23twn7Dda1Q1JZP+e937vO+HDKz/6jL5J2UqKPiJNTYcJai7WGMD/nEGLECPR7nTblzZGJUTm4+RB/MENrpSkbpG6QWtudns8UiAGRHiYZEk8RI9AGkrWIea5Eg8HfLZDKg7HIM4y2tVUjWLXsvnWDycMRLnEs9ZZI1pTPfeMa3vu2OSoQNdLtdbj/rV3+4N/8T3Y+2MU482gQ+3E6SrfbI8aIiDAcDtjYWGd5efnRg7e3p9PvUY8r/IMJtgxYFUzisKnDJCmaQjQJxK3TeUdAPZilCq7M8EaId45gf4bYTx7atf/iV/7pvzqW2200jB8e4IY53aUeEoV00+Kw3P3+HmlqEdMWWEnmqHYiH/3JDQKerc9sYGxb45/UIuu6pq6qtk/Z653oc56gWCKkvYz+5TViVOqDKSog4iAakBrFEOMGKgNUjnvgcux3uL4ne6FAMsXcLgkPxxjz6U4yLECYRytcFCbbe7h+Tm9lAKr0X+hiU2Hn3QMIYBPbjuAkCRIT7v75Lvc+uMfa5SV6q+0k6bHlNE1DVbXjgJ1OB+fc2VxTFWMMnc0Brp9THkygDIvuU9QtVJbb8V7sIn2oV+xyIH1xiqaK3JniH47a81Sfdvj0MRDmB6lcNEwfHmIHcyAQll/os/LcKof3R5Q7JaidZxRHJ8uY3C/46M0b5Gspa5dW2oILwVhDWZaLc1GdTufsQmzORpVIOuzQ2Vimrgv8NABrBFbaTjcWI749BhA9yaYnuTptDePuDL89acv3H2cC9xQIc4swUZhu7+MGHXrLfYxY3Bac//wm/dUe5aymHnmqoqRpapw46pHn9gd3eeXnrmHzdo9brtAOeFpr58xUnlp+yHwk0OZCtjZkcj8hVEOwph0CVwMNhCSSX6owlytM4wk3jtC9AmN/PAAA5M4fvPvUjoVqIJrI6heu0J8LGuPZGB9AZ8rR/SlHN0bMHhaEUtFUufTF81z50oW2hj8hYR4dHS0qx0VgPF3LzMmVUuw17PzAw9gRHJjo0KioqbFDj7sQMYMa3a/wd8eYqYK1T5XYnnq0UPQZIBw7a1S8KKtvXGawNThx9mnaDnXMyYfOB6ljjODb2YYsS0kSt7CGOC+mTseFtndggFAqoxslhzcF8a4VfIJBJSKDhnyjRtY8eKjvT5DdCRIMGPPs/tnx6JBpU7lVQY20cffuH76v+qyiSASN4E3D+huX6G8uL+jseDJlOp3i55PwbTAUzBwMkTbYWWtJkoQ0TTHS9iTaSfPj7bBoaSh3PeM7kTjKMC60fu8iMgi4VY8Ma0wq+MMp/saEpGnbdY+pzAvtXRZN5rZLdaKVGCLaBJqmIVY1bvrwgP7WGjH4p/Xg2q5ynBOqLwj9rSVQZTjs0+t3mU1nFMVsPtsEKg5j2wgeFUITqGvPdFaAUay2kyZSp+jMUR4F9MBAlYBNkZ5CFki6igwbpFshiZKlGd3uAOn22D+sqR/OcCZtF3kipizOXYaA+kDTeEIZaeqGUDdQN8TaoyFCVOSdf/u7mj23Tv+5deLiuM1TauQYaJxn/fXn6W8tt6jOOUGMkaqq2lnD2i8m2E/yOlWwVUosIE4dYZbSOnyFTQMuA+1GyAOSRTTzWGvIXYde3l0oVsznUg5uPKB6fxsqQS3E0uMrT13XhLpGqwZtQuuiURbugLTHho9rE2eco7i/hwr0zq+Bjydw0MfNzBiS4Nh/6xa8Af3NZWKM87POhk6npcMxRqq6wc8n4xZupYpkBuklyAYgHrXNvJvs5+OBgkiCSyxJmpLY5IkxUTDaUt31K+eYDrrc+m9vMb19SGozJMZWdTEG0Xl3W1xLLU5ORp7YGXnn3/2BCoIPDdn5VYbPbbYdncUtz7KISGMb1r9whf7mUguEMfzEX/ORdV823Prm++z/xXU6kiDOfaL4c6oNpyjOWeoH+4zv77T+/CxJyAguWvbmZbgxhp/Q4fvTQVsVmydc/cXP8/w3fpqmZ/DFWYNeT9eBzKO1CdYkVPf3Gd/bPnMW4fF+hsPFlP3v3mT88HB+ukT/P+DQnnJTVTZevcQrv/pzdD+zjq+qp5bOz27NoxhrmT3Y42hnH5518OPYItSw9/ZNJjujBfX9ySPBQh3Llzpc+3tfZf1nX8GfeP4ogLOINfMS3y56kv8HdZ9mmA/17v0AAAAASUVORK5CYII=" alt="Logotipo de UBB Comunicaciones" width="65" height="65">
+
+            <div>
+
+                <h1>Administración de planes y servicios</h1>
+
+                <p>Gestión de paquetes, velocidades y perfiles por servicio</p>
+
+            </div>
+
+        </div>
+
+        <div class="estado-conexion">
+
+            <span class="punto <?= $errorConexion ? 'error' : '' ?>"></span>
+
+            <?= $errorConexion ? 'Error de conexión MikroTik' : 'MikroTik · ' . escapar($mikrotikConfig['host']) ?>
+
+        </div>
+
+    </header>
+    <div class="aviso" id="inicio">
+        <strong>Integración por servicio:</strong>
+        esta pantalla utiliza <code>id_servicio</code> para relacionar la información de clientes y catálogo.
+        Funciona en modo consulta: no escribe en inventario, no modifica la base de Jamileth ni aplica cambios en MikroTik o RADIUS.
+    </div>
+    <?php if ($errorConexion): ?>
+        <div class="aviso error"><?= escapar($errorConexion) ?></div>
+    <?php endif; ?>
+    <?php if ($errorConsultaRadius): ?>
+        <div class="aviso error"><?= escapar($errorConsultaRadius) ?></div>
+    <?php endif; ?>
+    <?php if ($errorBaseDatos): ?>
+        <div class="aviso error"><strong>Consulta de clientes pendiente:</strong> <?= escapar($errorBaseDatos) ?></div>
+    <?php endif; ?>
+
+    <section class="estadisticas">
+
+        <article class="tarjeta-estadistica">
+
+            <div class="estadistica-etiqueta">Cuentas PPPoE</div>
+
+            <div class="estadistica-numero"><?= $totalClientes ?></div>
+
+            <div class="estadistica-descripcion">Registradas en MikroTik</div>
+
+        </article>
+
+        <article class="tarjeta-estadistica">
+
+            <div class="estadistica-etiqueta">Conectados ahora</div>
+
+            <div class="estadistica-numero"><?= $totalConectados ?></div>
+
+            <div class="estadistica-descripcion">Sesiones PPP activas en MikroTik</div>
+
+        </article>
+
+        <article class="tarjeta-estadistica">
+
+            <div class="estadistica-etiqueta">Habilitadas</div>
+
+            <div class="estadistica-numero"><?= $clientesHabilitados ?></div>
+
+            <div class="estadistica-descripcion">Cuentas habilitadas</div>
+
+        </article>
+
+        <article class="tarjeta-estadistica">
+
+            <div class="estadistica-etiqueta">Deshabilitadas</div>
+
+            <div class="estadistica-numero"><?= $clientesDeshabilitados ?></div>
+
+            <div class="estadistica-descripcion">Cuentas deshabilitadas</div>
+
+        </article>
+
+        <article class="tarjeta-estadistica">
+
+            <div class="estadistica-etiqueta">Relacionados en Jamileth</div>
+
+            <div class="estadistica-numero"><?= $clientesRelacionados ?></div>
+
+            <div class="estadistica-descripcion">PPPoE con cliente y servicio válidos</div>
+
+        </article>
+
+        <article class="tarjeta-estadistica tarjeta-pendiente">
+
+            <div class="estadistica-etiqueta">Pendientes en Jamileth</div>
+
+            <div class="estadistica-numero"><?= $clientesPppoePendientes ?></div>
+
+            <div class="estadistica-descripcion">Sin id_cliente e id_servicio</div>
+
+        </article>
+
+    </section>
+    <div class="pppoe-mini-resumen">
+        <span><strong><?= $clientesSinRegistroJamileth ?></strong> sin registro PPPoE en Jamileth</span>
+        <span><strong><?= $clientesRelacionadosHibridos ?></strong> relaciones DHCP_PPPOE</span>
+        <span><strong><?= $clientesDuplicadosMikrotik ?></strong> nombres duplicados en MikroTik</span>
+        <span><strong><?= $clientesRelacionAmbigua + $clientesRevisarRelacion ?></strong> relaciones para revisar</span>
+        <span><strong><?= $inventarioPppoeDisponible ? $clientesInventarioEnSecrets . ' / ' . $totalClientes : 'No verificado' ?></strong> en inventario.pppoe_secrets</span>
+    </div>
+    <section class="panel catalogo-panel" id="catalogo">
+        <div class="panel-cabecera">
+            <div>
+                <h2>Catálogo comercial</h2>
+                <p>Planes vigentes consultados desde ubb_gestion_planes.</p>
+            </div>
+            <span class="etiqueta"><?= count($planesCatalogo) ?> planes activos</span>
+        </div>
+
+        <?php if ($errorCatalogo): ?>
+            <div class="aviso error"><?= escapar($errorCatalogo) ?></div>
+        <?php elseif (!$planesCatalogo): ?>
+            <p class="empty-copy">No hay planes comerciales activos registrados.</p>
+        <?php else: ?>
+            <div class="catalogo-grid">
+                <?php foreach ($planesCatalogo as $plan): ?>
+                    <article class="plan-card">
+                        <div class="plan-card-top">
+                            <h3><?= escapar($plan['nombre_plan']) ?></h3>
+                            <span class="plan-status"><?= escapar($plan['estado']) ?></span>
+                        </div>
+                        <div class="plan-price">
+                            <?php if ($plan['precio_mensual'] !== null && $plan['precio_mensual'] !== ''): ?>
+                                $<?= number_format((float) $plan['precio_mensual'], 2) ?>
+                            <?php else: ?>
+                                Por definir
+                            <?php endif; ?>
+                            <small>mensual</small>
+                        </div>
+                        <div class="plan-speeds">
+                            <div class="plan-speed">
+                                <small>Inalámbrico</small>
+                                <strong><?php if (isset($plan['velocidades']['INALAMBRICO'])): ?><?= number_format($plan['velocidades']['INALAMBRICO'], 0) ?> Mbps<?php else: ?>Por definir<?php endif; ?></strong>
+                            </div>
+                            <div class="plan-speed">
+                                <small>Fibra</small>
+                                <strong><?php if (isset($plan['velocidades']['FIBRA'])): ?><?= number_format($plan['velocidades']['FIBRA'], 0) ?> Mbps<?php else: ?>Por definir<?php endif; ?></strong>
+                            </div>
+                        </div>
+                    </article>
+                <?php endforeach; ?>
+            </div>
+        <?php endif; ?>
+    </section>
+
+            <div class="dashboard-grid">
+                <section class="directorio-section" id="clientes">
+        <section>
+
+            <h2 class="seccion-titulo">Directorio de clientes y servicios</h2>
+
+            <div class="panel panel-clientes">
+
+                <div class="directorio-nota">MikroTik aporta las cuentas y perfiles; Jamileth determina si existe una relación válida con cliente y servicio. Inventario se usa únicamente como contraste. Este directorio no modifica ninguna de esas fuentes.</div>
+                <?php if ($errorInventarioPppoe): ?>
+                    <div class="aviso">Inventario PPPoE: <?= escapar($errorInventarioPppoe) ?> La referencia de <code>clientes_servicios</code> no sustituye la consulta de <code>pppoe_secrets</code>.</div>
+                <?php endif; ?>
+
+                <div class="panel-cabecera">
+
+                    <div>
+
+                        <h2>Directorio de clientes</h2>
+
+                        <p>Consulta clientes, paquetes, velocidades y sus relaciones de servicio.</p>
+
+                    </div>
+
+                    <span class="etiqueta"><?= $totalClientes ?> registros</span>
+
+                </div>
+
+                <div class="barra-busqueda">
+
+                    <div class="buscador">
+
+                        <input type="search" id="buscarCliente" placeholder="Buscar usuario, id_servicio, plan, IP o MAC..." autocomplete="off">
+
+                    </div>
+
+                    <span class="contador" id="contadorVisible"><?= $totalClientes ?> registros</span>
+
+                    <button type="button" class="boton boton-secundario boton-exportar" id="exportarCSV">Exportar CSV</button>
+
+                </div>
+
+                <div class="filtros-rapidos" role="group" aria-label="Filtros rápidos de clientes">
+
+                    <button type="button" class="filtro-rapido activo" data-filtro-cliente="todos" aria-pressed="true">Todos <span class="filtro-cantidad"><?= $totalClientes ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="relacionado" aria-pressed="false">Relacionados <span class="filtro-cantidad"><?= $clientesRelacionados ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="pendiente" aria-pressed="false">Pendientes Jamileth <span class="filtro-cantidad"><?= $clientesPppoePendientes ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="sin_registro" aria-pressed="false">Sin registro Jamileth <span class="filtro-cantidad"><?= $clientesSinRegistroJamileth ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="duplicado" aria-pressed="false">Duplicados MikroTik <span class="filtro-cantidad"><?= $clientesDuplicadosMikrotik ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="conectado" aria-pressed="false">Conectados <span class="filtro-cantidad"><?= $totalConectados ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="habilitado" aria-pressed="false">Habilitados <span class="filtro-cantidad"><?= $clientesHabilitados ?></span></button>
+
+                    <button type="button" class="filtro-rapido" data-filtro-cliente="deshabilitado" aria-pressed="false">Deshabilitados <span class="filtro-cantidad"><?= $clientesDeshabilitados ?></span></button>
+
+                </div>
+
+                <div class="ayuda-tabla-clientes">↔ Desliza horizontalmente para consultar todas las columnas; los datos técnicos se mantienen en una sola línea.</div>
+
+                <div class="tabla-contenedor">
+
+                    <table>
+
+                        <thead>
+
+                        <tr>
+
+                            <th>Usuario / cliente</th>
+
+                            <th>id_servicio</th>
+
+                            <th>Paquete</th>
+
+                            <th>Precio mensual</th>
+
+                            <th>Velocidad</th>
+
+                            <th>Perfil PPPoE</th>
+
+                            <th>IP</th>
+
+                            <th>MAC (MikroTik)</th>
+
+                            <th>Relación Jamileth</th>
+
+                            <th>Inventario</th>
+
+                            <th>Estado cuenta</th>
+
+                            <th>Acción</th>
+
+                        </tr>
+
+                        </thead>
+
+                        <tbody id="tablaClientes">
+
+                        <?php if (!$clientes): ?>
+
+                            <tr><td colspan="12">No se encontraron cuentas PPPoE.</td></tr>
+
+                        <?php else: ?>
+
+                            <?php foreach ($clientes as $cliente): ?>
+
+                                <?php
+
+                                $busqueda = mb_strtolower(
+
+                                    implode(' ', [
+
+                                        $cliente['usuario'],
+
+                                        $cliente['nombre_cliente'],
+
+                                        $cliente['id_servicio'],
+
+                                        $cliente['plan'],
+
+                                        $cliente['precio_mensual'] ?? '',
+
+                                        $cliente['perfil'],
+
+                                        $cliente['velocidad_mostrar'] ?? $cliente['velocidad'],
+
+                                        $cliente['radius_rate_limit'] ?? '',
+
+                                        $cliente['radius_lista'] ?? '',
+
+                                        $cliente['remote_address'],
+
+                                        $cliente['caller_id'],
+                                        $cliente['estado_integracion'],
+                                        $cliente['estado_inventario'],
+                                        $cliente['duplicado_mikrotik'] ? 'duplicado' : '',
+
+                                    ]),
+
+                                    'UTF-8'
+
+                                );
+
+                                ?>
+
+                                <?php
+                                    $filtroRelacion = match ($cliente['estado_integracion']) {
+                                        'RELACIONADO', 'RELACIONADO_DHCP_PPPOE' => 'relacionado',
+                                        'PENDIENTE' => 'pendiente',
+                                        'SIN_REGISTRO_JAMILETH' => 'sin_registro',
+                                        'RELACION_AMBIGUA' => 'ambiguo',
+                                        'REVISAR_RELACION' => 'revisar',
+                                        default => 'no_verificable',
+                                    };
+                                    $etiquetaRelacion = match ($cliente['estado_integracion']) {
+                                        'RELACIONADO' => 'RELACIONADO',
+                                        'RELACIONADO_DHCP_PPPOE' => 'RELACIONADO · DHCP_PPPOE',
+                                        'PENDIENTE' => 'PENDIENTE EN JAMILETH',
+                                        'SIN_REGISTRO_JAMILETH' => 'SIN REGISTRO EN JAMILETH',
+                                        'RELACION_AMBIGUA' => 'RELACIÓN AMBIGUA',
+                                        'REVISAR_RELACION' => 'REVISAR RELACIÓN',
+                                        default => 'JAMILETH NO VERIFICABLE',
+                                    };
+                                    $claseRelacion = in_array($filtroRelacion, ['relacionado'], true)
+                                        ? 'relacionado'
+                                        : (in_array($filtroRelacion, ['pendiente'], true) ? 'pendiente' : 'estado-error');
+                                ?>
+                                <tr data-busqueda="<?= escapar($busqueda) ?>" data-estado="<?= $cliente['disabled'] ? 'deshabilitado' : 'habilitado' ?>" data-relacion="<?= escapar($filtroRelacion) ?>" data-duplicado="<?= !empty($cliente['duplicado_mikrotik']) ? '1' : '0' ?>" data-conectado="<?= isset($usuariosActivos[mb_strtolower(trim($cliente['usuario']), 'UTF-8')]) ? '1' : '0' ?>">
+
+                                    <td>
+
+                                        <div class="usuario-nombre"><?= escapar($cliente['usuario']) ?></div>
+
+                                        <?php if ($cliente['nombre_cliente'] !== ''): ?>
+
+                                            <div class="usuario-subtexto"><?= escapar($cliente['nombre_cliente']) ?></div>
+
+                                        <?php endif; ?>
+                                        <?php if (!empty($cliente['duplicado_mikrotik'])): ?>
+                                            <div class="usuario-subtexto"><strong>Nombre repetido en respuesta MikroTik</strong></div>
+                                        <?php endif; ?>
+
+                                    </td>
+
+                                    <td><?= escapar($cliente['id_servicio'] ?: 'SIN RELACIÓN') ?></td>
+
+                                    <td><span class="perfil-etiqueta"><?= escapar($cliente['plan']) ?></span></td>
+
+                                    <td>
+                                        <?php if ($cliente['precio_mensual'] !== null && $cliente['precio_mensual'] !== ''): ?>
+                                            $<?= number_format((float) $cliente['precio_mensual'], 2) ?>
+                                        <?php else: ?>
+                                            —
+                                        <?php endif; ?>
+                                    </td>
+
+                                    <td>
+                                        <?= escapar($cliente['velocidad_mostrar'] ?? $cliente['velocidad']) ?>
+                                        <?php if (!empty($cliente['radius_identidad_confirmada'])): ?>
+                                            <div class="usuario-subtexto">RADIUS confirmado</div>
+                                        <?php endif; ?>
+                                    </td>
+
+                                    <td><?= escapar($cliente['perfil']) ?></td>
+
+                                    <td><?= escapar($cliente['remote_address'] ?: '—') ?></td>
+
+                                    <td><?= escapar($cliente['caller_id'] ?: 'MAC no disponible') ?></td>
+
+                                    <td>
+                                        <span class="estado <?= $claseRelacion ?>">
+                                            <?= escapar($etiquetaRelacion) ?>
+                                        </span>
+                                    </td>
+
+                                    <td>
+                                        <span class="estado <?= str_starts_with($cliente['estado_inventario'], 'EN ') || str_starts_with($cliente['estado_inventario'], 'REFERENCIA ') ? 'relacionado' : 'pendiente' ?>">
+                                            <?= escapar($cliente['estado_inventario']) ?>
+                                        </span>
+                                    </td>
+
+                                    <td>
+
+                                        <span class="estado <?= $cliente['disabled'] ? 'inactivo' : 'activo' ?>">
+
+                                            <?= $cliente['disabled'] ? 'Deshabilitada' : 'Habilitada' ?>
+
+                                        </span>
+
+                                    </td>
+
+                                    <td>
+
+                                        <button
+
+                                            type="button"
+
+                                            class="boton boton-rosa boton-ver-planes"
+
+                                            data-usuario="<?= escapar($cliente['usuario']) ?>"
+
+                                            data-id-servicio="<?= escapar($cliente['id_servicio']) ?>"
+
+                                            data-service="<?= escapar($cliente['service']) ?>"
+
+                                            data-perfil="<?= escapar($cliente['perfil']) ?>"
+
+                                            data-plan="<?= escapar($cliente['plan']) ?>"
+                                            data-precio="<?= ($cliente['precio_mensual'] ?? '') !== '' ? escapar(number_format((float)$cliente['precio_mensual'], 2, '.', ',')) : '' ?>"
+
+                                            data-velocidad="<?= escapar($cliente['velocidad']) ?>"
+
+                                            data-radius-confirmada="<?= !empty($cliente['radius_identidad_confirmada']) ? '1' : '0' ?>"
+
+                                            data-radius-velocidad="<?= escapar($cliente['radius_rate_limit'] ?? '') ?>"
+
+                                            data-radius-lista="<?= escapar($cliente['radius_lista'] ?? '') ?>"
+
+                                            data-radius-username="<?= escapar($cliente['radius_username'] ?? '') ?>"
+
+                                            data-ip="<?= escapar($cliente['remote_address']) ?>"
+
+                                            data-mac="<?= escapar($cliente['caller_id']) ?>"
+
+                                            data-disabled="<?= $cliente['disabled'] ? '1' : '0' ?>"
+
+                                        >Consultar</button>
+
+                                    </td>
+
+                                </tr>
+
+                            <?php endforeach; ?>
+
+                        <?php endif; ?>
+
+                        </tbody>
+
+                    </table>
+
+                </div>
+                <div class="controles-tabla">
+                    <div class="desplazamiento-tabla" aria-label="Desplazamiento horizontal de la tabla">
+                        <span class="ayuda-desplazamiento">Mover tabla</span>
+                        <button type="button" class="boton-flecha-tabla" id="desplazarIzquierda" aria-label="Desplazar tabla hacia la izquierda" title="Desplazar a la izquierda">←</button>
+                        <button type="button" class="boton-flecha-tabla" id="desplazarDerecha" aria-label="Desplazar tabla hacia la derecha" title="Desplazar a la derecha">→</button>
+                    </div>
+                    <nav class="paginacion" aria-label="Paginación de clientes">
+                        <div class="paginacion-resumen" id="resumenPaginacion">Mostrando clientes</div>
+                        <div class="paginacion-controles">
+                            <button type="button" class="boton-paginacion" id="paginaAnterior" aria-label="Página anterior">← Anterior</button>
+                            <span class="pagina-indicador" id="indicadorPagina" aria-live="polite">Página 1 de 1</span>
+                            <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguiente" aria-label="Página siguiente">Siguiente →</button>
+                        </div>
+                    </nav>
+                </div>
+
+
+            </div>
+
+        </section>
+                </section>
+        <aside class="insights-column">
+            <section class="panel insight-panel" id="perfiles">
+                <div class="panel-cabecera">
+                    <div>
+                        <h2>Uso de perfiles</h2>
+                        <p>Distribución de cuentas según el perfil de MikroTik.</p>
+                    </div>
+                    <span class="etiqueta"><?= count($planesDisponibles) ?> perfiles</span>
+                </div>
+                <?php if ($totalClientes > 0): ?>
+                    <div class="grafica-contenedor"><canvas id="graficaPlanes"></canvas></div>
+                <?php else: ?>
+                    <p class="empty-copy">No hay datos suficientes para mostrar la gráfica.</p>
+                <?php endif; ?>
+            </section>
+
+            <section class="panel insight-panel" id="actividad">
+                <div class="panel-cabecera">
+                    <div>
+                        <h2>Actividad reciente</h2>
+                        <p>Estado de integración de avisos entre módulos.</p>
+                    </div>
+                    <span class="etiqueta">Pendiente</span>
+                </div>
+                <div class="activity-empty">
+                    <div class="activity-mark">i</div>
+                    <div>
+                        <strong>Historial no conectado</strong>
+                        <p>Los avisos no se consultan desde inventario en esta versión. Se mostrarán cuando exista una fuente autorizada para el módulo de actividad.</p>
+                    </div>
+                </div>
+            </section>
+        </aside>
+
+            </div>
+
+
+<section class="module-placeholder dhcp-panel" id="moduloDhcp">
+    <div class="historial-cabecera">
+        <div>
+            <span class="module-tag">MikroTik · Jamileth · RADIUS · Solo lectura</span>
+            <h2>Directorio de equipos DHCP</h2>
+            <p>Concesiones consultadas en MikroTik y enriquecidas con relaciones verificadas de Jamileth.</p>
+        </div>
+        <a class="boton boton-secundario" href="?modulo=dhcp">↻ Actualizar</a>
+    </div>
+
+    <div class="directorio-nota">
+        Se muestran las concesiones que MikroTik devuelve actualmente. La relación con Jamileth se busca mediante servidor DHCP + MAC; la MAC sola no se considera identificador único. Los atributos RADIUS mostrados son los que están registrados en radcheck/radreply y no sustituyen una prueba de autenticación en vivo.
+    </div>
+
+    <?php if ($errorConsultaDhcp): ?>
+        <div class="aviso error"><?= escapar($errorConsultaDhcp) ?></div>
+    <?php endif; ?>
+    <?php if ($errorIntegracionDhcp): ?>
+        <div class="aviso error"><?= escapar($errorIntegracionDhcp) ?></div>
+    <?php endif; ?>
+    <?php if ($errorConsultaRadius): ?>
+        <div class="aviso error">RADIUS no está disponible para enriquecer los registros DHCP: <?= escapar($errorConsultaRadius) ?></div>
+    <?php endif; ?>
+
+    <div class="dhcp-resumen">
+        <article class="dhcp-metrica"><small>Concesiones consultadas</small><strong><?= count($concesionesDhcp) ?></strong></article>
+        <article class="dhcp-metrica"><small>Estado bound</small><strong><?= $dhcpBound ?></strong></article>
+        <article class="dhcp-metrica"><small>Con servicio relacionado</small><strong><?= $dhcpConRelacion ?></strong></article>
+        <article class="dhcp-metrica"><small>Con lista RADIUS</small><strong><?= $dhcpConListaRadius ?></strong></article>
+    </div>
+
+    <div class="panel panel-clientes">
+        <div class="panel-cabecera">
+            <div>
+                <h2>Concesiones DHCP de MikroTik</h2>
+                <p>El listado no se limita a los registros históricos importados: representa las concesiones que responde el router al momento de cargar esta pantalla.</p>
+            </div>
+            <span class="etiqueta"><?= count($concesionesDhcp) ?> concesiones</span>
+        </div>
+
+        <div class="dhcp-tools">
+            <div class="dhcp-buscador"><input type="search" id="buscarDhcp" placeholder="Buscar hostname, servidor, IP, MAC o servicio..." autocomplete="off"></div>
+            <span class="contador" id="contadorDhcp"><?= count($concesionesDhcp) ?> registros</span>
+            <button type="button" class="boton boton-secundario" id="exportarDhcpCSV">Exportar CSV</button>
+        </div>
+
+        <div class="filtros-rapidos" role="group" aria-label="Filtros de concesiones DHCP">
+            <button type="button" class="filtro-rapido activo" data-filtro-dhcp="todos" aria-pressed="true">Todos</button>
+            <button type="button" class="filtro-rapido" data-filtro-dhcp="bound" aria-pressed="false">Bound</button>
+            <button type="button" class="filtro-rapido" data-filtro-dhcp="relacionado" aria-pressed="false">Relacionados</button>
+            <button type="button" class="filtro-rapido" data-filtro-dhcp="pendiente" aria-pressed="false">Sin relación</button>
+            <button type="button" class="filtro-rapido" data-filtro-dhcp="radius" aria-pressed="false">Con lista RADIUS</button>
+        </div>
+
+        <div class="tabla-contenedor dhcp-tabla">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Equipo</th>
+                        <th>Servidor DHCP</th>
+                        <th>Cliente / servicio</th>
+                        <th>IP actual</th>
+                        <th>MAC</th>
+                        <th>Estado de concesión</th>
+                        <th>Tipo</th>
+                        <th>Relación Jamileth</th>
+                        <th>Plan comercial / velocidad</th>
+                        <th>Rate-limit RADIUS (opcional)</th>
+                        <th>Lista RADIUS</th>
+                    </tr>
+                </thead>
+                <tbody id="tablaDhcp">
+                    <?php if ($errorConsultaDhcp): ?>
+                        <tr><td colspan="11" class="sin-resultados">No fue posible consultar las concesiones en MikroTik.</td></tr>
+                    <?php elseif (!$concesionesDhcp): ?>
+                        <tr><td colspan="11" class="sin-resultados">MikroTik no devolvió concesiones DHCP.</td></tr>
+                    <?php else: ?>
+                        <?php foreach ($concesionesDhcp as $equipoDhcp): ?>
+                            <?php
+                                $busquedaDhcp = mb_strtolower(implode(' ', [
+                                    $equipoDhcp['hostname'],
+                                    $equipoDhcp['servidor'],
+                                    $equipoDhcp['id_cliente'],
+                                    $equipoDhcp['id_servicio'],
+                                    $equipoDhcp['nombre_cliente'],
+                                    $equipoDhcp['lista_mikrotik'],
+                                    $equipoDhcp['estado_pcq'],
+                                    $equipoDhcp['plan_comercial'],
+                                    $equipoDhcp['tecnologia'],
+                                    $equipoDhcp['estado_plan_dhcp'],
+                                    $equipoDhcp['ip'],
+                                    $equipoDhcp['mac'],
+                                    $equipoDhcp['estado'],
+                                    $equipoDhcp['radius_rate_limit'],
+                                    $equipoDhcp['radius_lista'],
+                                ]), 'UTF-8');
+                                $relacionClaseDhcp = $equipoDhcp['estado_integracion'] === 'RELACIONADO'
+                                    ? 'relacionado'
+                                    : 'pendiente';
+                            ?>
+                            <tr
+                                data-busqueda="<?= escapar($busquedaDhcp) ?>"
+                                data-estado="<?= escapar($equipoDhcp['estado']) ?>"
+                                data-relacion="<?= escapar($relacionClaseDhcp) ?>"
+                                data-radius="<?= $equipoDhcp['radius_configurado'] ? '1' : '0' ?>"
+                            >
+                                <td>
+                                    <strong><?= escapar($equipoDhcp['hostname'] ?: 'Hostname no disponible') ?></strong>
+                                    <span class="dhcp-subtexto">ID cliente <?= escapar($equipoDhcp['id_cliente'] ?: '—') ?></span>
+                                </td>
+                                <td><?= escapar($equipoDhcp['servidor'] ?: 'No expuesto por MikroTik') ?></td>
+                                <td>
+                                    <strong><?= escapar($equipoDhcp['nombre_cliente'] ?: 'Sin cliente relacionado') ?></strong>
+                                    <span class="dhcp-subtexto">Servicio <?= escapar($equipoDhcp['id_servicio'] ?: '—') ?></span>
+                                </td>
+                                <td><?= escapar($equipoDhcp['ip'] ?: '—') ?></td>
+                                <td><?= escapar($equipoDhcp['mac'] ?: 'MAC no disponible') ?></td>
+                                <td><span class="estado <?= $equipoDhcp['estado'] === 'bound' ? 'activo' : 'pendiente' ?>"><?= escapar($equipoDhcp['estado']) ?></span></td>
+                                <td><?= escapar($equipoDhcp['tipo']) ?></td>
+                                <td><span class="estado <?= $relacionClaseDhcp ?>"><?= escapar($equipoDhcp['estado_integracion']) ?></span></td>
+                                <td>
+                                    <?php if ($equipoDhcp['plan_comercial'] !== ''): ?>
+                                        <strong><?= escapar($equipoDhcp['plan_comercial']) ?></strong>
+                                        <span class="dhcp-subtexto"><?= escapar($equipoDhcp['tecnologia'] ?: 'Tecnología pendiente') ?></span>
+                                        <span class="dhcp-subtexto">
+                                            Bajada: <?= $equipoDhcp['velocidad_comercial_descarga'] !== null ? escapar((string) $equipoDhcp['velocidad_comercial_descarga']) . ' Mbps' : '—' ?>
+                                            · Subida: <?= $equipoDhcp['velocidad_comercial_subida'] !== null ? escapar((string) $equipoDhcp['velocidad_comercial_subida']) . ' Mbps' : '—' ?>
+                                        </span>
+                                    <?php else: ?>
+                                        <strong>Sin plan comercial</strong>
+                                    <?php endif; ?>
+                                    <span class="dhcp-subtexto"><?= escapar($equipoDhcp['estado_plan_dhcp']) ?></span>
+                                    <span class="dhcp-subtexto">Lista MikroTik: <?= escapar($equipoDhcp['lista_mikrotik'] ?: 'No disponible') ?></span>
+                                    <span class="dhcp-subtexto">
+                                        PCQ técnico:
+                                        <?= $equipoDhcp['pcq_descarga'] !== null ? escapar((string) $equipoDhcp['pcq_descarga']) . ' Mbps' : '—' ?>
+                                        descarga /
+                                        <?= $equipoDhcp['pcq_subida'] !== null ? escapar((string) $equipoDhcp['pcq_subida']) . ' Mbps' : '—' ?>
+                                        subida
+                                    </span>
+                                    <span class="dhcp-subtexto">Validación PCQ: <?= escapar($equipoDhcp['estado_pcq']) ?></span>
+                                </td>
+                                <td>
+                                    <?= escapar($equipoDhcp['radius_rate_limit'] ?: 'Sin rate-limit único') ?>
+                                    <?php if ($equipoDhcp['radius_configurado']): ?><span class="dhcp-subtexto">Identidad y lista registradas en RADIUS</span><?php endif; ?>
+                                </td>
+                                <td><?= escapar($equipoDhcp['radius_lista'] ?: '—') ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
+        <nav class="paginacion paginacion-listado" id="paginacionDhcp" aria-label="Paginación de equipos DHCP">
+            <div class="paginacion-resumen" id="resumenPaginacionDhcp">Mostrando registros</div>
+            <div class="paginacion-controles">
+                <button type="button" class="boton-paginacion" id="paginaAnteriorDhcp" aria-label="Página anterior de DHCP">← Anterior</button>
+                <span class="pagina-indicador" id="indicadorPaginaDhcp" aria-live="polite">Página 1 de 1</span>
+                <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguienteDhcp" aria-label="Página siguiente de DHCP">Siguiente →</button>
+            </div>
+        </nav>
+        <p class="dhcp-nota">
+            <?php if ($errorIntegracionDhcp): ?>
+                No se pudo verificar la relación con Jamileth; por seguridad, ninguna concesión se presenta como relacionada hasta recuperar esa consulta.
+            <?php else: ?>
+                <?= $dhcpPendientes ?> concesiones actuales no tienen una relación confirmada por servidor + MAC en la integración de Jamileth.
+            <?php endif; ?>
+            Los registros híbridos DHCP_PPPOE no se mezclan en este directorio para evitar duplicar equipos sin validar primero su correspondencia.
+        </p>
+    </div>
+</section>
+
+<section class="module-placeholder solicitud-panel" id="moduloSolicitudes">
+    <div class="solicitud-cabecera">
+        <div>
+            <span class="module-tag">Gestión de servicios · PPPoE inalámbrico</span>
+            <h2>Nueva solicitud de cambio</h2>
+            <p>Registra una solicitud para revisión. No modifica el servicio ni el router.</p>
+        </div>
+        <a class="boton boton-secundario" href="?modulo=historial">Ver historial de cambios</a>
+    </div>
+
+    <?php if ($flashSolicitud): ?>
+        <div class="solicitud-mensaje correcto">
+            <strong>¡Solicitud registrada!</strong>
+            <span>Folio #<?= (int) ($flashSolicitud['id'] ?? 0) ?>. Consulta su seguimiento en Historial de cambios.</span>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($errorFormularioSolicitud): ?>
+        <div class="solicitud-mensaje error">
+            <strong>No se pudo registrar</strong>
+            <span><?= escapar($errorFormularioSolicitud) ?></span>
+        </div>
+    <?php endif; ?>
+
+    <?php if ($errorRelacionesSolicitud): ?>
+        <div class="module-status">
+            <strong>Catálogo de relaciones no disponible</strong>
+            <span><?= escapar($errorRelacionesSolicitud) ?></span>
+        </div>
+    <?php endif; ?>
+
+    <form method="post" action="?modulo=solicitudes" class="solicitud-form">
+        <input type="hidden" name="accion" value="registrar_solicitud">
+        <input type="hidden" name="csrf_solicitud" value="<?= escapar($csrfSolicitud) ?>">
+
+        <div class="solicitud-campo solicitud-campo-completo">
+            <label for="servicio_solicitud">Cliente y servicio</label>
+            <select id="servicio_solicitud" name="id_servicio" required>
+                <option value="">Selecciona un servicio</option>
+                <?php foreach ($serviciosSolicitud as $servicioSolicitud): ?>
+                    <option value="<?= escapar($servicioSolicitud['id_servicio']) ?>">
+                        <?= escapar($servicioSolicitud['nombre'] ?: 'Cliente sin nombre') ?>
+                        · Servicio <?= escapar($servicioSolicitud['id_servicio']) ?>
+                        · <?= escapar($servicioSolicitud['usuario']) ?>
+                        · Actual: <?= escapar($servicioSolicitud['plan_actual']) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <?php if (!$serviciosSolicitud): ?>
+                <small>No hay servicios inalámbricos PPPoE elegibles con asignación activa.</small>
+            <?php endif; ?>
+        </div>
+
+        <div class="solicitud-campo">
+            <label for="plan_nuevo">Nuevo plan comercial</label>
+            <select id="plan_nuevo" name="id_plan_nuevo" required>
+                <option value="">Selecciona un plan</option>
+                <?php foreach ($planesSolicitud as $planSolicitud): ?>
+                    <option value="<?= escapar($planSolicitud['id_plan']) ?>">
+                        <?= escapar($planSolicitud['nombre']) ?>
+                        · <?= escapar($planSolicitud['descarga'] ?? '—') ?> Mbps
+                        bajada / <?= escapar($planSolicitud['subida'] ?? '—') ?> Mbps subida
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+
+        <div class="solicitud-campo">
+            <label for="perfil_nuevo">Perfil MikroTik relacionado</label>
+            <select id="perfil_nuevo" name="id_perfil_nuevo" required>
+                <option value="">Primero selecciona un plan</option>
+                <?php foreach ($relacionesSolicitud as $relacion): ?>
+                    <option
+                        value="<?= (int) $relacion['id_perfil'] ?>"
+                        data-plan="<?= (int) $relacion['id_plan'] ?>"
+                        data-validacion="<?= escapar($relacion['estado_validacion']) ?>"
+                        disabled
+                    >
+                        <?= escapar($relacion['nombre_perfil']) ?>
+                        · <?= escapar($relacion['estado_validacion']) ?>
+                        · <?= escapar($relacion['rate_limit'] ?? 'Sin rate-limit') ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+            <small>Las relaciones pendientes requieren confirmación antes de poder validar el cambio.</small>
+        </div>
+
+        <div class="solicitud-campo">
+            <label for="responsable_solicitud">Responsable de la solicitud</label>
+            <input
+                type="text"
+                id="responsable_solicitud"
+                name="responsable"
+                maxlength="100"
+                required
+                placeholder="Nombre del responsable"
+            >
+        </div>
+
+        <div class="solicitud-campo">
+            <label for="motivo_solicitud">Motivo del cambio</label>
+            <textarea
+                id="motivo_solicitud"
+                name="motivo"
+                rows="3"
+                maxlength="255"
+                required
+                placeholder="Describe por qué se solicita el cambio..."
+            ></textarea>
+        </div>
+
+        <div class="solicitud-resumen solicitud-campo-completo">
+            <strong>¿Qué ocurrirá al registrar?</strong>
+            <span>Se guardará una solicitud pendiente en ubb_gestion_planes. No se modifica la asignación actual, RADIUS ni MikroTik.</span>
+        </div>
+
+        <div class="solicitud-acciones solicitud-campo-completo">
+            <button
+                type="submit"
+                class="boton boton-rosa"
+                <?= (!$serviciosSolicitud || !$relacionesSolicitud || $errorRelacionesSolicitud) ? 'disabled' : '' ?>
+            >Registrar solicitud</button>
+            <span>Tipo de conexión: PPPoE</span>
+        </div>
+    </form>
+</section>
+
+
+
+<section class="module-placeholder historial-panel" id="moduloHistorial">
+    <div class="historial-cabecera">
+        <div>
+            <span class="module-tag">Consulta en vivo · Solo lectura</span>
+            <h2>Historial de cambios</h2>
+            <p>Solicitudes, responsables, validaciones, autorizaciones y resultados.</p>
+        </div>
+        <div class="historial-acciones" style="display:flex;gap:8px;flex-wrap:wrap">
+            <a class="boton boton-rosa" href="?modulo=solicitudes">＋ Nueva solicitud</a>
+            <a class="boton boton-secundario" href="?modulo=historial">↻ Actualizar</a>
+        </div>
+    </div>
+
+    <?php if ($errorHistorial): ?>
+        <div class="module-status">
+            <strong>No se pudo cargar el historial</strong>
+            <span><?= escapar($errorHistorial) ?></span>
+        </div>
+    <?php elseif (!$historialCambios): ?>
+        <div class="historial-vacio">
+            <strong>Aún no hay cambios registrados</strong>
+            <p>Cuando se registren solicitudes, aparecerán aquí. Esta pantalla solamente consulta información.</p>
+        </div>
+    <?php else: ?>
+        <div class="historial-resumen">
+            <strong><?= count($historialCambios) ?> registros cargados</strong>
+            <span>Máximo 200 movimientos recientes.</span>
+        </div>
+        <div class="tabla-contenedor historial-tabla">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Folio / servicio</th>
+                        <th>Fecha / responsable</th>
+                        <th>Cambio solicitado</th>
+                        <th>Validación</th>
+                        <th>Autorización</th>
+                        <th>Resultado / verificación</th>
+                    </tr>
+                </thead>
+                <tbody id="tablaHistorial">
+                    <?php foreach ($historialCambios as $cambio): ?>
+                    <tr>
+                        <td>
+                            <strong>#<?= (int)$cambio['id_cambio'] ?></strong>
+                            <div class="historial-subtexto">Servicio <?= escapar($cambio['id_servicio']) ?></div>
+                        </td>
+                        <td>
+                            <strong><?= escapar(date('d/m/Y H:i', strtotime($cambio['fecha_cambio']))) ?></strong>
+                            <div class="historial-subtexto"><?= escapar($cambio['usuario_responsable'] ?? 'No indicado') ?></div>
+                        </td>
+                        <td>
+                            <strong><?= escapar($cambio['plan_anterior'] ?? 'Sin plan anterior') ?> → <?= escapar($cambio['plan_nuevo'] ?? 'Sin plan nuevo') ?></strong>
+                            <div class="historial-subtexto"><?= escapar($cambio['perfil_anterior'] ?? '—') ?> → <?= escapar($cambio['perfil_nuevo'] ?? '—') ?></div>
+                            <div class="historial-subtexto"><?= escapar($cambio['motivo'] ?? '') ?></div>
+                        </td>
+                        <td>
+                            <span class="estado <?= escapar(claseEstadoCambio($cambio['estado_validacion'])) ?>"><?= escapar($cambio['estado_validacion']) ?></span>
+                            <div class="historial-subtexto"><?= escapar($cambio['usuario_validacion'] ?? 'Sin responsable') ?></div>
+                        </td>
+                        <td>
+                            <span class="estado <?= escapar(claseEstadoCambio($cambio['estado_autorizacion'])) ?>"><?= escapar($cambio['estado_autorizacion']) ?></span>
+                            <div class="historial-subtexto"><?= escapar($cambio['usuario_autorizacion'] ?? 'Sin responsable') ?></div>
+                        </td>
+                        <td>
+                            <span class="estado <?= escapar(claseEstadoCambio($cambio['resultado_aplicacion'])) ?>"><?= escapar($cambio['resultado_aplicacion']) ?></span>
+                            <div class="historial-subtexto">Verificación: <?= escapar($cambio['estado_verificacion']) ?></div>
+                        </td>
+                    </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+        </div>
+        <nav class="paginacion paginacion-listado" id="paginacionHistorial" aria-label="Paginación del historial de cambios">
+            <div class="paginacion-resumen" id="resumenPaginacionHistorial">Mostrando registros</div>
+            <div class="paginacion-controles">
+                <button type="button" class="boton-paginacion" id="paginaAnteriorHistorial" aria-label="Página anterior del historial">← Anterior</button>
+                <span class="pagina-indicador" id="indicadorPaginaHistorial" aria-live="polite">Página 1 de 1</span>
+                <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguienteHistorial" aria-label="Página siguiente del historial">Siguiente →</button>
+            </div>
+        </nav>
+    <?php endif; ?>
+</section>
+
+
+<section class="module-placeholder radius-panel" id="moduloCentroRadius">
+    <div class="radius-cabecera">
+        <div>
+            <span class="module-tag">Monitoreo · Solo lectura</span>
+            <h2>Centro RADIUS</h2>
+            <p>UBB-COMUNICACIONES · Monitoreo de autenticaciones y accounting.</p>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+            <span class="radius-estado <?= (!$errorConsultaRadius && !$errorCentroRadius) ? '' : 'sin-registros' ?>">
+                <?= (!$errorConsultaRadius && !$errorCentroRadius) ? 'Base radius conectada' : 'Consulta RADIUS pendiente' ?>
+            </span>
+            <a class="boton boton-secundario" href="?modulo=centro-radius<?= $servicioCentroRadius !== 'todos' ? '&servicio=' . escapar($servicioCentroRadius) : '' ?>">↻ Actualizar</a>
+        </div>
+    </div>
+
+    <?php if ($errorCentroRadius): ?>
+        <div class="aviso error"><?= escapar($errorCentroRadius) ?></div>
+    <?php endif; ?>
+
+    <div class="radius-resumen">
+        <?php foreach (['pppoe', 'dhcp'] as $tipoCentro): ?>
+            <?php $nasCentro = $resumenCentroRadius[$tipoCentro]; ?>
+            <article class="radius-nas-card">
+                <div class="radius-nas-top">
+                    <span class="radius-nas-tipo"><?= $tipoCentro === 'pppoe' ? 'PPPoE' : 'DHCP' ?></span>
+                    <span class="radius-estado <?= $nasCentro['total'] > 0 ? '' : 'sin-registros' ?>">
+                        <?= $nasCentro['total'] > 0 ? 'Registros encontrados' : 'Sin registros' ?>
+                    </span>
+                </div>
+                <h3><?= escapar($nasCentro['nombre']) ?></h3>
+                <div class="radius-nas-ip">NAS <?= escapar($nasCentro['nas']) ?></div>
+                <div class="radius-nas-stats">
+                    <div class="radius-nas-stat">
+                        <small>Sesiones registradas</small>
+                        <strong><?= (int) $nasCentro['total'] ?></strong>
+                    </div>
+                    <div class="radius-nas-stat">
+                        <small>Abiertas en accounting</small>
+                        <strong><?= (int) $nasCentro['abiertas'] ?></strong>
+                    </div>
+                </div>
+                <div class="radius-ultima">
+                    <?php if (!empty($nasCentro['ultima_abierta'])): ?>
+                        <strong>Último registro sin Stop:</strong><br>
+                        <?= escapar($nasCentro['ultima_abierta']['username'] ?? '—') ?><br>
+                        IP <?= escapar($nasCentro['ultima_abierta']['framedipaddress'] ?? '—') ?>
+                        · <?= escapar($nasCentro['ultima_abierta']['nasportid'] ?? '—') ?>
+                        <?php
+                            $identidadUltimaCentro = strtoupper(trim((string) ($nasCentro['ultima_abierta']['username'] ?? '')));
+                            $rateUltimoCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Rate-Limit'] ?? [];
+                            $listaUltimaCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Address-List'] ?? [];
+                            $grupoUltimoCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Group'] ?? [];
+                        ?>
+                        <?php if (!empty($rateUltimoCentro)): ?>
+                            <br>Rate-limit RADIUS: <?= escapar((string) $rateUltimoCentro[0]) ?>
+                        <?php endif; ?>
+                        <?php if (!empty($listaUltimaCentro)): ?>
+                            <br>Address-list RADIUS: <?= escapar((string) $listaUltimaCentro[0]) ?>
+                        <?php endif; ?>
+                        <?php if (!empty($grupoUltimoCentro)): ?>
+                            <br>Grupo PPP RADIUS: <?= escapar((string) $grupoUltimoCentro[0]) ?>
+                        <?php endif; ?>
+                    <?php elseif ($nasCentro['ultima']): ?>
+                        <strong>Última actividad registrada:</strong><br><?= escapar(formatearFechaRadius($nasCentro['ultima'])) ?>
+                    <?php else: ?>
+                        Sin actividad registrada en radacct.
+                    <?php endif; ?>
+                </div>
+            </article>
+        <?php endforeach; ?>
+    </div>
+
+    <div class="radius-nota">
+        <strong>Cómo interpretar los estados:</strong> “Abierta en accounting” significa que la fila de <code>radacct</code> tiene <code>acctstoptime IS NULL</code>. No confirma por sí sola que el equipo siga conectado en tiempo real; para eso debe contrastarse con el estado del MikroTik correspondiente. Esta pantalla no modifica RADIUS, SQL ni routers.
+    </div>
+
+    <div class="panel panel-clientes">
+        <div class="panel-cabecera">
+            <div>
+                <h2>Actividad de autenticación</h2>
+                <p>Últimos registros de sesiones PPPoE y DHCP almacenados en <code>radius.radacct</code>.</p>
+            </div>
+            <span class="etiqueta"><?= count($sesionesCentroRadius) ?> registros cargados · máximo 100</span>
+        </div>
+
+        <div class="radius-filtros">
+            <div class="radius-filtros-grupo" role="group" aria-label="Filtrar actividad RADIUS">
+                <a class="radius-filtro <?= $servicioCentroRadius === 'todos' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=todos">Todos</a>
+                <a class="radius-filtro <?= $servicioCentroRadius === 'pppoe' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=pppoe">PPPoE</a>
+                <a class="radius-filtro <?= $servicioCentroRadius === 'dhcp' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=dhcp">DHCP</a>
+            </div>
+            <span class="contador">Filtro: <?= escapar(strtoupper($servicioCentroRadius)) ?></span>
+        </div>
+
+        <?php if ($errorCentroRadius): ?>
+            <div class="radius-vacio">No se pudieron consultar las sesiones. Revisa el permiso SELECT sobre <code>radius.radacct</code>.</div>
+        <?php elseif (!$sesionesCentroRadius): ?>
+            <div class="radius-vacio">No se encontraron registros para el filtro seleccionado.</div>
+        <?php else: ?>
+            <div class="tabla-contenedor radius-tabla">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Servicio</th>
+                            <th>Identificador</th>
+                            <th>Usuario / MAC</th>
+                            <th>NAS / interfaz</th>
+                            <th>IP asignada</th>
+                            <th>Inicio / cierre</th>
+                            <th>Duración</th>
+                            <th>Tráfico entrada / salida</th>
+                            <th>Estado</th>
+                        </tr>
+                    </thead>
+                    <tbody id="tablaRadius">
+                        <?php foreach ($sesionesCentroRadius as $sesionCentro): ?>
+                            <?php
+                                $nasFilaCentro = (string) ($sesionCentro['nasipaddress'] ?? '');
+                                $esPppoeCentro = $nasFilaCentro === '10.0.2.230';
+                                $tipoFilaCentro = $esPppoeCentro ? 'PPPoE' : 'DHCP';
+                                $abiertaCentro = empty($sesionCentro['acctstoptime']);
+                                $entradaCentro = (float) ($sesionCentro['acctinputoctets'] ?? 0);
+                                $salidaCentro = (float) ($sesionCentro['acctoutputoctets'] ?? 0);
+                            ?>
+                            <tr>
+                                <td><span class="perfil-etiqueta"><?= escapar($tipoFilaCentro) ?></span></td>
+                                <td>
+                                    <strong><?= escapar($sesionCentro['acctsessionid'] ?: '—') ?></strong>
+                                    <span class="radius-secundario">Fila #<?= (int) $sesionCentro['radacctid'] ?></span>
+                                </td>
+                                <td>
+                                    <strong><?= escapar($sesionCentro['username'] ?: '—') ?></strong>
+                                    <span class="radius-secundario"><?= escapar($sesionCentro['callingstationid'] ?: '') ?></span>
+                                </td>
+                                <td>
+                                    <?= escapar($nasFilaCentro) ?>
+                                    <span class="radius-secundario"><?= escapar($sesionCentro['nasportid'] ?: 'Interfaz no indicada') ?></span>
+                                </td>
+                                <td><?= escapar($sesionCentro['framedipaddress'] ?: '—') ?></td>
+                                <td>
+                                    <?= escapar(formatearFechaRadius($sesionCentro['acctstarttime'])) ?>
+                                    <span class="radius-secundario">Cierre: <?= escapar(formatearFechaRadius($sesionCentro['acctstoptime'])) ?></span>
+                                </td>
+                                <td><?= $abiertaCentro ? 'Sin Stop' : escapar(formatearDuracionRadius($sesionCentro['acctsessiontime'])) ?></td>
+                                <td>
+                                    <?= number_format($entradaCentro / 1048576, 2) ?> MB
+                                    <span class="radius-secundario">Salida: <?= number_format($salidaCentro / 1048576, 2) ?> MB</span>
+                                </td>
+                                <td>
+                                    <span class="estado <?= $abiertaCentro ? 'estado-ok' : 'estado-pendiente' ?>">
+                                        <?= $abiertaCentro ? 'Abierta en accounting' : 'Cerrada' ?>
+                                    </span>
+                                    <span class="radius-secundario">Autenticación: <?= escapar($sesionCentro['acctauthentic'] ?: 'No indicada') ?></span>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+            <nav class="paginacion paginacion-listado" id="paginacionRadius" aria-label="Paginación de sesiones RADIUS">
+                <div class="paginacion-resumen" id="resumenPaginacionRadius">Mostrando registros</div>
+                <div class="paginacion-controles">
+                    <button type="button" class="boton-paginacion" id="paginaAnteriorRadius" aria-label="Página anterior de RADIUS">← Anterior</button>
+                    <span class="pagina-indicador" id="indicadorPaginaRadius" aria-live="polite">Página 1 de 1</span>
+                    <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguienteRadius" aria-label="Página siguiente de RADIUS">Siguiente →</button>
+                </div>
+            </nav>
+        <?php endif; ?>
+    </div>
+</section>
+
+            <footer class="pie">UBB Comunicaciones · Gestión de clientes, paquetes, perfiles y velocidades · Modo consulta</footer>
+        </main>
+    </div>
+</div>
+
+<div class="modal" id="modalPlanes" role="dialog" aria-modal="true" aria-labelledby="tituloModal">
+
+    <div class="modal-contenido">
+
+        <div class="modal-cabecera">
+
+            <div>
+
+                <h2 id="tituloModal">Resumen del servicio</h2>
+
+                <p>Consulta la información comercial y técnica del servicio. La aplicación de cambios está deshabilitada en esta versión.</p>
+
+            </div>
+
+            <button type="button" class="modal-cerrar" id="cerrarModal" aria-label="Cerrar">×</button>
+
+        </div>
+
+        <div class="modal-cuerpo">
+
+            <div class="informacion-cliente">
+
+                <div class="dato-cliente"><small>Usuario</small><strong id="modalUsuario">—</strong></div>
+
+                <div class="dato-cliente"><small>id_servicio</small><strong id="modalIdServicio">—</strong></div>
+                <div class="dato-cliente"><small>Plan comercial</small><strong id="modalPlanComercial">—</strong></div>
+                <div class="dato-cliente"><small>Precio mensual</small><strong id="modalPrecioMensual">—</strong></div>
+
+                <div class="dato-cliente"><small>Estado</small><strong id="modalEstado">—</strong></div>
+
+                <div class="dato-cliente"><small>IP remota</small><strong id="modalIp">—</strong></div>
+
+                <div class="dato-cliente"><small>MAC / Caller ID</small><strong id="modalMac">—</strong></div>
+
+                <div class="dato-cliente"><small>Perfil PPPoE local</small><strong id="modalPerfilActual">—</strong></div>
+                <div class="dato-cliente"><small>Identidad RADIUS por MAC</small><strong id="modalRadiusEstado">—</strong></div>
+                <div class="dato-cliente"><small>Velocidad guardada en RADIUS</small><strong id="modalRadiusVelocidad">—</strong></div>
+                <div class="dato-cliente"><small>Lista RADIUS</small><strong id="modalRadiusLista">—</strong></div>
+
+            </div>
+
+            <h3 class="titulo-perfiles">Paquetes disponibles</h3>
+
+            <div class="perfiles-grid">
+
+                <?php foreach ($planesDisponibles as $perfil): ?>
+
+                    <button
+
+                        type="button"
+
+                        class="perfil-card"
+
+                        data-nombre="<?= escapar($perfil['nombre']) ?>"
+
+                        data-etiqueta="<?= escapar(obtenerNombreComercialPerfil($perfil['nombre'])) ?>"
+
+                        data-velocidad="<?= escapar($perfil['velocidad']) ?>"
+
+                        data-rate-limit="<?= escapar($perfil['rate_limit']) ?>"
+
+                    >
+
+                        <strong><?= escapar(obtenerNombreComercialPerfil($perfil['nombre'])) ?></strong>
+
+                        <span>Velocidad configurada: <?= escapar($perfil['velocidad']) ?></span>
+
+                        <span class="perfil-actual-texto"></span>
+
+                    </button>
+
+                <?php endforeach; ?>
+
+            </div>
+
+            <div class="comparacion-perfiles">
+
+                <div class="comparacion-item actual">
+
+                    <small>Plan actual DHCP/RADIUS</small>
+
+                    <strong id="comparacionActual">—</strong>
+
+                    <p id="velocidadActual">Velocidad: —</p>
+
+                </div>
+
+                <div class="comparacion-item nuevo">
+
+                    <small>Paquete propuesto</small>
+
+                    <strong id="comparacionNuevo">Selecciona un paquete</strong>
+
+                    <p id="velocidadNueva">Velocidad: —</p>
+
+                </div>
+
+            </div>
+<div class="mensaje-solicitud visible" id="mensajeSolicitud" role="status" aria-live="polite">Modo consulta: puedes comparar la información de los perfiles, pero no se guardarán cambios en RADIUS ni en MikroTik.</div>
+
+        </div>
+
+        <div class="modal-pie">
+
+            <button type="button" class="boton boton-secundario" id="cancelarModal">Cerrar</button>
+
+            <button type="button" class="boton boton-rosa" id="prepararSolicitud" disabled title="Operación deshabilitada en modo consulta">Aplicación deshabilitada</button>
+
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+
+const nombresGrafica = <?= json_encode($datosGraficaNombres, JSON_UNESCAPED_UNICODE) ?>;
+
+const valoresGrafica = <?= json_encode($datosGraficaValores, JSON_NUMERIC_CHECK) ?>;
+
+const lienzoGrafica = document.getElementById('graficaPlanes');
+
+if (lienzoGrafica) {
+
+    const etiquetasValores = {
+        id: 'etiquetasValores',
+        afterDatasetsDraw(chart) {
+            const ctx = chart.ctx;
+            const area = chart.chartArea;
+            chart.data.datasets.forEach(function (dataset, datasetIndex) {
+                const meta = chart.getDatasetMeta(datasetIndex);
+                meta.data.forEach(function (barra, indice) {
+                    const valor = Number(dataset.data[indice] ?? 0);
+                    const posicion = barra.getProps(['x', 'y'], true);
+                    const cercaDelBorde = posicion.x > area.right - 42;
+                    ctx.save();
+                    ctx.font = '700 11px Arial, Helvetica, sans-serif';
+                    ctx.textBaseline = 'middle';
+                    ctx.textAlign = cercaDelBorde ? 'right' : 'left';
+                    ctx.fillStyle = cercaDelBorde ? '#FFFFFF' : '#4D4056';
+                    ctx.fillText(
+                        valor.toLocaleString('es-MX'),
+                        cercaDelBorde ? posicion.x - 9 : posicion.x + 9,
+                        posicion.y
+                    );
+                    ctx.restore();
+                });
+            });
+        }
+    };
+
+    new Chart(lienzoGrafica, {
+        type: 'bar',
+        data: {
+            labels: nombresGrafica,
+            datasets: [{
+                label: 'Servicios',
+                data: valoresGrafica,
+                backgroundColor: ['#7054C7', '#987FE0', '#C0B0F0'],
+                hoverBackgroundColor: ['#5E43B2', '#8267CF', '#AA97E6'],
+                borderRadius: 8,
+                borderSkipped: false,
+                maxBarThickness: 46,
+                barPercentage: .76,
+                categoryPercentage: .72
+            }]
+        },
+        options: {
+            indexAxis: 'y',
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: { duration: 650, easing: 'easeOutQuart' },
+            layout: { padding: { top: 8, right: 34, bottom: 4, left: 2 } },
+            plugins: {
+                legend: { display: false },
+                tooltip: {
+                    displayColors: false,
+                    backgroundColor: '#38294F',
+                    titleColor: '#FFFFFF',
+                    bodyColor: '#FFFFFF',
+                    padding: 12,
+                    cornerRadius: 9,
+                    callbacks: {
+                        label: function (context) {
+                            return Number(context.parsed.x).toLocaleString('es-MX') + ' servicios';
+                        }
+                    }
+                }
+            },
+            scales: {
+                x: {
+                    beginAtZero: true,
+                    grace: '12%',
+                    border: { display: false },
+                    grid: { color: 'rgba(129,121,135,.14)', drawTicks: false },
+                    ticks: {
+                        precision: 0,
+                        maxTicksLimit: 6,
+                        color: '#77717E',
+                        font: { size: 10 },
+                        callback: function (valor) {
+                            return Number(valor).toLocaleString('es-MX');
+                        }
+                    }
+                },
+                y: {
+                    border: { display: false },
+                    grid: { display: false },
+                    ticks: {
+                        color: '#514D58',
+                        padding: 10,
+                        font: { size: 11, weight: '600' }
+                    }
+                }
+            }
+        },
+        plugins: [etiquetasValores]
+    });
+
+}
+
+const buscador = document.getElementById('buscarCliente');
+const filas = Array.from(document.querySelectorAll('#tablaClientes tr[data-busqueda]'));
+const contadorVisible = document.getElementById('contadorVisible');
+const cuerpoTabla = document.getElementById('tablaClientes');
+const envolturaTabla = document.querySelector('.tabla-contenedor');
+const botonPaginaAnterior = document.getElementById('paginaAnterior');
+const botonPaginaSiguiente = document.getElementById('paginaSiguiente');
+const indicadorPagina = document.getElementById('indicadorPagina');
+const resumenPaginacion = document.getElementById('resumenPaginacion');
+const botonDesplazarIzquierda = document.getElementById('desplazarIzquierda');
+const botonDesplazarDerecha = document.getElementById('desplazarDerecha');
+const botonesFiltroCliente = Array.from(document.querySelectorAll('[data-filtro-cliente]'));
+const botonExportarCSV = document.getElementById('exportarCSV');
+const tamanoPagina = 10;
+let filtroClienteActual = 'todos';
+let paginaActual = 1;
+let filasFiltradas = filas.slice();
+let filaSinResultados = null;
+
+if (filas.length > 0) {
+    filaSinResultados = document.createElement('tr');
+    filaSinResultados.innerHTML = '<td colspan="12" class="sin-resultados">No se encontraron clientes con ese criterio.</td>';
+    filaSinResultados.style.display = 'none';
+    cuerpoTabla.appendChild(filaSinResultados);
+}
+
+function actualizarFlechasHorizontales() {
+    if (!envolturaTabla) return;
+    botonDesplazarIzquierda.disabled = envolturaTabla.scrollLeft <= 2;
+    botonDesplazarDerecha.disabled = envolturaTabla.scrollLeft + envolturaTabla.clientWidth >= envolturaTabla.scrollWidth - 2;
+}
+
+function dibujarPagina() {
+    const total = filasFiltradas.length;
+    const totalPaginas = Math.max(1, Math.ceil(total / tamanoPagina));
+    paginaActual = Math.min(Math.max(1, paginaActual), totalPaginas);
+    const inicio = total === 0 ? 0 : (paginaActual - 1) * tamanoPagina;
+    const fin = Math.min(inicio + tamanoPagina, total);
+
+    filas.forEach(function (fila) { fila.style.display = 'none'; });
+    filasFiltradas.slice(inicio, fin).forEach(function (fila) { fila.style.display = ''; });
+
+    if (filaSinResultados) filaSinResultados.style.display = total === 0 ? '' : 'none';
+
+    contadorVisible.textContent = total + (total === 1 ? ' coincidencia' : ' coincidencias');
+    resumenPaginacion.textContent = total === 0
+        ? 'Sin clientes que mostrar'
+        : 'Mostrando ' + (inicio + 1) + '–' + fin + ' de ' + total.toLocaleString('es-MX') + ' clientes';
+    indicadorPagina.textContent = 'Página ' + paginaActual + ' de ' + totalPaginas;
+    botonPaginaAnterior.disabled = paginaActual <= 1 || total === 0;
+    botonPaginaSiguiente.disabled = paginaActual >= totalPaginas || total === 0;
+    actualizarFlechasHorizontales();
+}
+
+function aplicarFiltro() {
+    const texto = buscador.value.trim().toLocaleLowerCase('es');
+    filasFiltradas = filas.filter(function (fila) {
+        const coincideTexto = (fila.dataset.busqueda || '').toLocaleLowerCase('es').includes(texto);
+        let coincideFiltro = true;
+
+        if (filtroClienteActual === 'conectado') coincideFiltro = fila.dataset.conectado === '1';
+        else if (filtroClienteActual === 'habilitado') coincideFiltro = fila.dataset.estado === 'habilitado';
+        else if (filtroClienteActual === 'deshabilitado') coincideFiltro = fila.dataset.estado === 'deshabilitado';
+        else if (filtroClienteActual === 'relacionado') coincideFiltro = fila.dataset.relacion === 'relacionado';
+        else if (filtroClienteActual === 'pendiente') coincideFiltro = fila.dataset.relacion === 'pendiente';
+        else if (filtroClienteActual === 'sin_registro') coincideFiltro = fila.dataset.relacion === 'sin_registro';
+        else if (filtroClienteActual === 'duplicado') coincideFiltro = fila.dataset.duplicado === '1';
+
+        return coincideTexto && coincideFiltro;
+    });
+    paginaActual = 1;
+    dibujarPagina();
+}
+
+buscador.addEventListener('input', aplicarFiltro);
+
+botonesFiltroCliente.forEach(function (boton) {
+    boton.addEventListener('click', function () {
+        filtroClienteActual = boton.dataset.filtroCliente || 'todos';
+        botonesFiltroCliente.forEach(function (otro) {
+            const activo = otro === boton;
+            otro.classList.toggle('activo', activo);
+            otro.setAttribute('aria-pressed', activo ? 'true' : 'false');
+        });
+        aplicarFiltro();
+    });
+});
+
+if (botonExportarCSV) {
+    botonExportarCSV.addEventListener('click', function () {
+        const encabezados = Array.from(document.querySelectorAll('.tabla-contenedor thead th'))
+            .slice(0, 11)
+            .map(function (celda) { return celda.innerText.trim(); });
+        const datos = filasFiltradas.map(function (fila) {
+            return Array.from(fila.cells).slice(0, 11).map(function (celda) {
+                return '"' + celda.innerText.trim().replace(/\s+/g, ' ').replace(/"/g, '""') + '"';
+            });
+        });
+        const contenido = '\uFEFF' + [encabezados, ...datos].map(function (fila) { return fila.join(','); }).join('\r\n');
+        const archivo = new Blob([contenido], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(archivo);
+        const enlace = document.createElement('a');
+        enlace.href = url;
+        enlace.download = 'clientes-pppoe-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(enlace);
+        enlace.click();
+        enlace.remove();
+        URL.revokeObjectURL(url);
+    });
+}
+
+botonPaginaAnterior.addEventListener('click', function () {
+    if (paginaActual > 1) {
+        paginaActual--;
+        dibujarPagina();
+        envolturaTabla.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+});
+botonPaginaSiguiente.addEventListener('click', function () {
+    const totalPaginas = Math.max(1, Math.ceil(filasFiltradas.length / tamanoPagina));
+    if (paginaActual < totalPaginas) {
+        paginaActual++;
+        dibujarPagina();
+        envolturaTabla.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+});
+
+function desplazarTabla(direccion) {
+    if (!envolturaTabla) return;
+    envolturaTabla.scrollBy({
+        left: direccion * Math.max(280, Math.round(envolturaTabla.clientWidth * 0.75)),
+        behavior: 'smooth'
+    });
+}
+
+botonDesplazarIzquierda.addEventListener('click', function () { desplazarTabla(-1); });
+botonDesplazarDerecha.addEventListener('click', function () { desplazarTabla(1); });
+if (envolturaTabla) {
+    envolturaTabla.addEventListener('scroll', actualizarFlechasHorizontales, { passive: true });
+    window.addEventListener('resize', actualizarFlechasHorizontales);
+}
+
+dibujarPagina();
+
+const modal = document.getElementById('modalPlanes');
+
+const tarjetasPerfiles = Array.from(document.querySelectorAll('.perfil-card'));
+
+const mensajeSolicitud = document.getElementById('mensajeSolicitud');
+
+let servicioSeleccionado = null;
+
+let perfilPropuesto = null;
+
+function texto(id, valor) {
+
+    document.getElementById(id).textContent = valor || '—';
+
+}
+
+function abrirModal(datos) {
+
+    servicioSeleccionado = datos;
+
+    perfilPropuesto = null;
+
+    texto('modalUsuario', datos.usuario);
+
+    texto('modalIdServicio', datos.idServicio || 'SIN RELACIÓN');
+    texto('modalPlanComercial', datos.plan || 'Sin asignación');
+    texto('modalPrecioMensual', datos.precio ? '$' + datos.precio : 'No registrado');
+
+    texto('modalEstado', datos.disabled ? 'Deshabilitada' : 'Habilitada');
+
+    texto('modalIp', datos.ip);
+
+    texto('modalMac', datos.mac);
+
+    texto('modalPerfilActual', datos.perfil);
+    texto('modalRadiusEstado', datos.radiusConfirmada ? 'IDENTIDAD CONFIRMADA' : 'SIN IDENTIDAD RADIUS CONFIRMADA');
+    texto('modalRadiusVelocidad', datos.radiusVelocidad || 'No disponible');
+    texto('modalRadiusLista', datos.radiusLista || 'No definida');
+    const botonAplicarRadius = document.getElementById('prepararSolicitud');
+    botonAplicarRadius.disabled = true;
+    botonAplicarRadius.title = 'Operación deshabilitada en modo consulta';
+
+    const normalizarRateLimit = valor =>
+        String(valor || '').trim().split(/\s+/).filter(Boolean).join(' ');
+
+    const rateRadiusActual = normalizarRateLimit(datos.radiusVelocidad);
+    const perfilRadiusActual = datos.radiusConfirmada && rateRadiusActual !== ''
+        ? (tarjetasPerfiles.find(tarjeta =>
+            normalizarRateLimit(tarjeta.dataset.rateLimit) === rateRadiusActual
+        ) || null)
+        : null;
+
+    texto('comparacionActual', perfilRadiusActual
+        ? perfilRadiusActual.dataset.etiqueta
+        : (datos.radiusConfirmada ? 'Plan RADIUS por identificar' : 'Sin datos RADIUS'));
+
+    const velocidadRadiusActual = perfilRadiusActual
+        ? perfilRadiusActual.dataset.velocidad
+        : (datos.radiusVelocidad || 'No disponible');
+
+    texto('velocidadActual',
+        'Velocidad: ' + velocidadRadiusActual +
+        ' · Lista: ' + (datos.radiusLista || 'No definida'));
+
+    texto('comparacionNuevo', 'Selecciona un paquete');
+
+    texto('velocidadNueva', 'Velocidad: —');
+
+    mensajeSolicitud.textContent = 'Modo consulta: puedes comparar la información de los perfiles, pero no se guardarán cambios en RADIUS ni en MikroTik.';
+    mensajeSolicitud.classList.add('visible');
+
+    tarjetasPerfiles.forEach(function (tarjeta) {
+        const actual = tarjeta === perfilRadiusActual;
+
+        tarjeta.className = 'perfil-card' +
+            (actual ? ' es-perfil-actual seleccionado' : '');
+
+        tarjeta.querySelector('.perfil-actual-texto').textContent =
+            actual ? '✓ Plan DHCP/RADIUS actual' : '';
+
+        if (actual) {
+            perfilPropuesto = {
+                nombre: tarjeta.dataset.nombre,
+                etiqueta: tarjeta.dataset.etiqueta,
+                velocidad: tarjeta.dataset.velocidad,
+                rateLimit: tarjeta.dataset.rateLimit
+            };
+
+            texto('comparacionNuevo', perfilPropuesto.etiqueta);
+            texto('velocidadNueva', 'Velocidad: ' + perfilPropuesto.velocidad);
+        }
+    });
+
+    modal.classList.add('abierto');
+
+    document.body.style.overflow = 'hidden';
+
+}
+
+function cerrarModal() {
+
+    modal.classList.remove('abierto');
+    document.body.style.overflow = '';
+
+}
+
+document.querySelectorAll('.boton-ver-planes').forEach(function (boton) {
+
+    boton.addEventListener('click', function () {
+
+        abrirModal({
+
+            usuario: this.dataset.usuario,
+
+            idServicio: this.dataset.idServicio,
+
+            perfil: this.dataset.perfil,
+
+            plan: this.dataset.plan,
+            precio: this.dataset.precio,
+
+            velocidad: this.dataset.velocidad,
+
+            ip: this.dataset.ip,
+
+            mac: this.dataset.mac,
+
+            radiusConfirmada: this.dataset.radiusConfirmada === '1',
+            radiusVelocidad: this.dataset.radiusVelocidad,
+            radiusLista: this.dataset.radiusLista,
+            radiusUsername: this.dataset.radiusUsername,
+
+            disabled: this.dataset.disabled === '1'
+
+        });
+
+    });
+
+});
+
+tarjetasPerfiles.forEach(function (tarjeta) {
+
+    tarjeta.addEventListener('click', function () {
+
+        if (!servicioSeleccionado) return;
+
+        perfilPropuesto = {
+
+            nombre: this.dataset.nombre,
+
+            etiqueta: this.dataset.etiqueta,
+
+            velocidad: this.dataset.velocidad,
+            rateLimit: this.dataset.rateLimit
+
+        };
+
+        tarjetasPerfiles.forEach(function (otra) {
+
+            const rateActualRadius = String(servicioSeleccionado.radiusVelocidad || '')
+                .trim().split(/\s+/).filter(Boolean).join(' ');
+            const rateTarjeta = String(otra.dataset.rateLimit || '')
+                .trim().split(/\s+/).filter(Boolean).join(' ');
+            const actual = servicioSeleccionado.radiusConfirmada
+                && rateActualRadius !== ''
+                && rateTarjeta === rateActualRadius;
+
+            const seleccionada = otra === tarjeta;
+
+            otra.className = 'perfil-card' +
+
+                (actual ? ' es-perfil-actual' : '') +
+
+                (seleccionada ? ' seleccionado' : '');
+
+            otra.querySelector('.perfil-actual-texto').textContent =
+
+                actual ? '✓ Plan DHCP/RADIUS actual' : '';
+
+        });
+
+        texto('comparacionNuevo', perfilPropuesto.etiqueta);
+
+        texto('velocidadNueva', 'Velocidad: ' + perfilPropuesto.velocidad);
+
+        mensajeSolicitud.textContent = 'Modo consulta: los perfiles son referencias para comparar; no se aplicará ningún cambio.';
+        mensajeSolicitud.classList.add('visible');
+
+    });
+
+});
+
+// La operación de escritura se mantiene deshabilitada en modo consulta.
+
+document.getElementById('cerrarModal').addEventListener('click', cerrarModal);
+
+document.getElementById('cancelarModal').addEventListener('click', cerrarModal);
+
+modal.addEventListener('click', function (evento) {
+
+    if (evento.target === modal) cerrarModal();
+
+});
+
+document.addEventListener('keydown', function (evento) {
+
+    if (evento.key === 'Escape' && modal.classList.contains('abierto')) {
+
+        cerrarModal();
+
+    }
+
+});
+
+</script>
+
+<script>
+(function () {
+    const TAMANO_PAGINA = 10;
+
+    function configurarPaginacionTabla(config) {
+        const tbody = document.getElementById(config.tbodyId);
+        const anterior = document.getElementById(config.prevId);
+        const siguiente = document.getElementById(config.nextId);
+        const indicador = document.getElementById(config.pageId);
+        const resumen = document.getElementById(config.summaryId);
+        const nav = document.getElementById(config.navId);
+        if (!tbody || !anterior || !siguiente || !indicador || !resumen || !nav) return null;
+
+        const filas = Array.from(tbody.querySelectorAll(config.rowSelector || 'tr'));
+        let paginaActual = 1;
+        let filasFiltradas = filas.slice();
+
+        function renderizar(paginaSolicitada) {
+            const total = filasFiltradas.length;
+            const totalPaginas = Math.max(1, Math.ceil(total / TAMANO_PAGINA));
+            paginaActual = Math.min(Math.max(1, paginaSolicitada || 1), totalPaginas);
+            const inicio = total === 0 ? 0 : (paginaActual - 1) * TAMANO_PAGINA;
+            const fin = Math.min(inicio + TAMANO_PAGINA, total);
+            const visibles = new Set(filasFiltradas.slice(inicio, fin));
+
+            filas.forEach(function (fila) {
+                fila.style.display = visibles.has(fila) ? '' : 'none';
+            });
+
+            resumen.textContent = total === 0
+                ? 'Sin registros que mostrar'
+                : 'Mostrando ' + (inicio + 1) + '–' + fin + ' de ' + total.toLocaleString('es-MX') + ' registros';
+            indicador.textContent = 'Página ' + paginaActual + ' de ' + totalPaginas;
+            anterior.disabled = paginaActual <= 1 || total === 0;
+            siguiente.disabled = paginaActual >= totalPaginas || total === 0;
+            nav.style.display = filas.length > 0 ? 'flex' : 'none';
+        }
+
+        function establecerFilas(nuevasFilas) {
+            filasFiltradas = nuevasFilas;
+            renderizar(1);
+        }
+
+        anterior.addEventListener('click', function () {
+            if (paginaActual > 1) renderizar(paginaActual - 1);
+        });
+        siguiente.addEventListener('click', function () {
+            const totalPaginas = Math.max(1, Math.ceil(filasFiltradas.length / TAMANO_PAGINA));
+            if (paginaActual < totalPaginas) renderizar(paginaActual + 1);
+        });
+
+        renderizar(1);
+        return { filas, establecerFilas, getFilasFiltradas: () => filasFiltradas };
+    }
+
+    // DHCP: filtros y búsqueda consideran todos los registros; se muestran 10 por página.
+    const tablaDhcp = document.getElementById('tablaDhcp');
+    const buscadorDhcp = document.getElementById('buscarDhcp');
+    const contadorDhcp = document.getElementById('contadorDhcp');
+    const botonesDhcp = Array.from(document.querySelectorAll('[data-filtro-dhcp]'));
+    const exportarDhcp = document.getElementById('exportarDhcpCSV');
+
+    if (tablaDhcp && buscadorDhcp && contadorDhcp) {
+        const paginadorDhcp = configurarPaginacionTabla({
+            tbodyId: 'tablaDhcp', navId: 'paginacionDhcp',
+            summaryId: 'resumenPaginacionDhcp', pageId: 'indicadorPaginaDhcp',
+            prevId: 'paginaAnteriorDhcp', nextId: 'paginaSiguienteDhcp',
+            rowSelector: 'tr[data-busqueda]'
+        });
+        let filtroDhcp = 'todos';
+        let filasVisiblesDhcp = paginadorDhcp ? paginadorDhcp.filas.slice() : [];
+
+        function aplicarFiltroDhcp() {
+            const texto = buscadorDhcp.value.trim().toLocaleLowerCase('es');
+            filasVisiblesDhcp = (paginadorDhcp ? paginadorDhcp.filas : []).filter(function (fila) {
+                const coincideTexto = (fila.dataset.busqueda || '').toLocaleLowerCase('es').includes(texto);
+                let coincideFiltro = true;
+                if (filtroDhcp === 'bound') coincideFiltro = fila.dataset.estado === 'bound';
+                else if (filtroDhcp === 'relacionado') coincideFiltro = fila.dataset.relacion === 'relacionado';
+                else if (filtroDhcp === 'pendiente') coincideFiltro = fila.dataset.relacion === 'pendiente';
+                else if (filtroDhcp === 'radius') coincideFiltro = fila.dataset.radius === '1';
+                return coincideTexto && coincideFiltro;
+            });
+            contadorDhcp.textContent = filasVisiblesDhcp.length + (filasVisiblesDhcp.length === 1 ? ' coincidencia' : ' coincidencias');
+            if (paginadorDhcp) paginadorDhcp.establecerFilas(filasVisiblesDhcp);
+        }
+
+        buscadorDhcp.addEventListener('input', aplicarFiltroDhcp);
+        botonesDhcp.forEach(function (boton) {
+            boton.addEventListener('click', function () {
+                filtroDhcp = boton.dataset.filtroDhcp || 'todos';
+                botonesDhcp.forEach(function (otro) {
+                    const activo = otro === boton;
+                    otro.classList.toggle('activo', activo);
+                    otro.setAttribute('aria-pressed', activo ? 'true' : 'false');
+                });
+                aplicarFiltroDhcp();
+            });
+        });
+
+        if (exportarDhcp) {
+            exportarDhcp.addEventListener('click', function () {
+                const encabezados = Array.from(tablaDhcp.closest('table').querySelectorAll('thead th'))
+                    .map(function (celda) { return celda.innerText.trim(); });
+                const datos = filasVisiblesDhcp.map(function (fila) {
+                    return Array.from(fila.cells).map(function (celda) {
+                        return '"' + celda.innerText.trim().replace(/\s+/g, ' ').replace(/"/g, '""') + '"';
+                    });
+                });
+                const contenido = '\uFEFF' + [encabezados, ...datos]
+                    .map(function (fila) { return fila.join(','); }).join('\r\n');
+                const archivo = new Blob([contenido], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(archivo);
+                const enlace = document.createElement('a');
+                enlace.href = url;
+                enlace.download = 'directorio-dhcp-' + new Date().toISOString().slice(0, 10) + '.csv';
+                document.body.appendChild(enlace);
+                enlace.click();
+                enlace.remove();
+                URL.revokeObjectURL(url);
+            });
+        }
+    }
+
+    // Historial y sesiones RADIUS: 10 registros por página.
+    configurarPaginacionTabla({
+        tbodyId: 'tablaHistorial', navId: 'paginacionHistorial',
+        summaryId: 'resumenPaginacionHistorial', pageId: 'indicadorPaginaHistorial',
+        prevId: 'paginaAnteriorHistorial', nextId: 'paginaSiguienteHistorial'
+    });
+    configurarPaginacionTabla({
+        tbodyId: 'tablaRadius', navId: 'paginacionRadius',
+        summaryId: 'resumenPaginacionRadius', pageId: 'indicadorPaginaRadius',
+        prevId: 'paginaAnteriorRadius', nextId: 'paginaSiguienteRadius'
+    });
+})();
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const plan = document.getElementById('plan_nuevo');
+    const perfil = document.getElementById('perfil_nuevo');
+    if (!plan || !perfil) return;
+
+    function filtrarPerfiles() {
+        const planSeleccionado = plan.value;
+        perfil.value = '';
+
+        let disponibles = 0;
+        for (const opcion of perfil.options) {
+            if (!opcion.value) continue;
+            const coincide = planSeleccionado !== ''
+                && opcion.dataset.plan === planSeleccionado;
+            opcion.hidden = !coincide;
+            opcion.disabled = !coincide;
+            if (coincide) disponibles++;
+        }
+
+        perfil.options[0].text = disponibles
+            ? 'Selecciona un perfil'
+            : 'No hay perfiles relacionados para este plan';
+    }
+
+    plan.addEventListener('change', filtrarPerfiles);
+    filtrarPerfiles();
+});
+</script>
+
+</body>
+
+</html>

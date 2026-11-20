@@ -1,0 +1,25 @@
+# --- UBB: proteger archivos internos ---
+Options -Indexes
+
+# Configuracion, respaldos, datos y codigo fuente
+<FilesMatch "(?i)^(docker-compose.*|Dockerfile.*|composer\.(json|lock)|README\.md|.*\.(ya?ml|bak|tsv|csv|py|sql|sh|log|key|pem|crt|env|ini)|\.ht.*)$">
+    Require all denied
+</FilesMatch>
+
+# Scripts de prueba
+<FilesMatch "(?i)^(prueba.*|verificar-.*)\.php$">
+    Require all denied
+</FilesMatch>
+
+# Carpetas internas
+RedirectMatch 404 "^/(vendor|respaldos|pruebas-uisp)(/|$)"
+
+# Bloquear respaldos, llaves y datos sueltos
+<FilesMatch "(\.bak|\.orig$|\.sql|\.tar|\.zip$|\.tsv$|\.key$|\.pem$|\.py$|\.sh$|\.log$)">
+    Require all denied
+</FilesMatch>
+
+# Bloquear copias de archivos PHP (index.php.algo)
+<FilesMatch "\.php\.">
+    Require all denied
+</FilesMatch>
