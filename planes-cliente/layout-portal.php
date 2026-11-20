@@ -178,7 +178,6 @@ table.historial{font-size:12.5px}
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Clientes y servicios</span>
-                <?= portalEnlace('clientes', $moduloActual, '◉', 'Clientes PPPoE') ?>
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Planes y perfiles</span>
@@ -187,7 +186,6 @@ table.historial{font-size:12.5px}
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Monitoreo y control</span>
-                <?= portalEnlace('centro-radius', $moduloActual, '◉', 'Centro RADIUS') ?>
                 <?= portalEnlace('radius-dhcp', $moduloActual, '⇄', 'Clientes DHCP RADIUS') ?>
                 <?= portalEnlace('radius-pppoe', $moduloActual, '⇆', 'Clientes PPPoE RADIUS') ?>
                 <?= portalEnlace('historial', $moduloActual, '◷', 'Gestión de cambios') ?>

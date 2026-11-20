@@ -10,7 +10,7 @@ session_start();
 
 date_default_timezone_set('America/Mexico_City');
 
-$modulosPermitidos = ['inicio', 'clientes', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'centro-radius', 'radius-dhcp', 'radius-pppoe'];
+$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'radius-dhcp', 'radius-pppoe'];
 $moduloActual = (string) ($_GET['modulo'] ?? 'inicio');
 if (!in_array($moduloActual, $modulosPermitidos, true)) {
     $moduloActual = 'inicio';
@@ -1167,121 +1167,6 @@ try {
     unset($clienteRadius);
 }
 
-/* CENTRO RADIUS: historial y accounting en modo exclusivamente de lectura. */
-$servicioCentroRadius = strtolower(trim((string) ($_GET['servicio'] ?? 'todos')));
-if (!in_array($servicioCentroRadius, ['todos', 'pppoe', 'dhcp'], true)) {
-    $servicioCentroRadius = 'todos';
-}
-$sesionesCentroRadius = [];
-$errorCentroRadius = null;
-$resumenCentroRadius = [
-    'pppoe' => [
-        'nombre' => 'RESIDENTES',
-        'nas' => '10.0.2.230',
-        'total' => 0,
-        'abiertas' => 0,
-        'ultima' => null,
-    ],
-    'dhcp' => [
-        'nombre' => 'MKR-FSL02',
-        'nas' => '10.0.1.6',
-        'total' => 0,
-        'abiertas' => 0,
-        'ultima' => null,
-    ],
-];
-
-if ($moduloActual === 'centro-radius') {
-    try {
-        if (!($pdoRadiusRead instanceof PDO)) {
-            throw new RuntimeException('No hay conexión disponible de solo lectura con la base radius.');
-        }
-
-        // Resumen por NAS. "Abiertas" significa acctstoptime IS NULL en radacct;
-        // no sustituye la comprobación de sesión activa directamente en RouterOS.
-        $sqlResumenCentro = "
-            SELECT
-                nasipaddress,
-                COUNT(*) AS total,
-                SUM(CASE WHEN acctstoptime IS NULL THEN 1 ELSE 0 END) AS abiertas,
-                MAX(COALESCE(acctupdatetime, acctstarttime)) AS ultima
-            FROM radacct
-            WHERE nasipaddress IN (?, ?)
-            GROUP BY nasipaddress
-        ";
-        $stmtResumenCentro = $pdoRadiusRead->prepare($sqlResumenCentro);
-        $stmtResumenCentro->execute(['10.0.2.230', '10.0.1.6']);
-        foreach ($stmtResumenCentro->fetchAll() as $filaResumenCentro) {
-            $nasResumen = (string) ($filaResumenCentro['nasipaddress'] ?? '');
-            $claveResumen = $nasResumen === '10.0.2.230'
-                ? 'pppoe'
-                : ($nasResumen === '10.0.1.6' ? 'dhcp' : '');
-            if ($claveResumen !== '') {
-                $resumenCentroRadius[$claveResumen]['total'] = (int) $filaResumenCentro['total'];
-                $resumenCentroRadius[$claveResumen]['abiertas'] = (int) $filaResumenCentro['abiertas'];
-                $resumenCentroRadius[$claveResumen]['ultima'] = $filaResumenCentro['ultima'];
-            }
-        }
-
-        // Último registro sin Stop por NAS para mostrar el último contexto conocido.
-        $sqlUltimaAbiertaCentro = "
-            SELECT username, nasportid, framedipaddress, acctsessionid, acctstarttime
-            FROM radacct
-            WHERE nasipaddress = ? AND acctstoptime IS NULL
-            ORDER BY COALESCE(acctupdatetime, acctstarttime) DESC, radacctid DESC
-            LIMIT 1
-        ";
-        $stmtUltimaAbiertaCentro = $pdoRadiusRead->prepare($sqlUltimaAbiertaCentro);
-        foreach (['pppoe' => '10.0.2.230', 'dhcp' => '10.0.1.6'] as $claveServicioCentro => $nasServicioCentro) {
-            $stmtUltimaAbiertaCentro->execute([$nasServicioCentro]);
-            $resumenCentroRadius[$claveServicioCentro]['ultima_abierta'] = $stmtUltimaAbiertaCentro->fetch() ?: null;
-        }
-
-        $whereServicioCentro = '';
-        $parametrosCentro = ['10.0.2.230', '10.0.1.6'];
-        if ($servicioCentroRadius === 'pppoe') {
-            $whereServicioCentro = ' AND nasipaddress = ? ';
-            $parametrosCentro[] = '10.0.2.230';
-        } elseif ($servicioCentroRadius === 'dhcp') {
-            $whereServicioCentro = ' AND nasipaddress = ? ';
-            $parametrosCentro[] = '10.0.1.6';
-        }
-
-        $sqlSesionesCentro = "
-            SELECT
-                radacctid,
-                acctsessionid,
-                username,
-                nasipaddress,
-                nasportid,
-                nasporttype,
-                acctstarttime,
-                acctupdatetime,
-                acctstoptime,
-                acctsessiontime,
-                acctauthentic,
-                acctinputoctets,
-                acctoutputoctets,
-                calledstationid,
-                callingstationid,
-                acctterminatecause,
-                framedipaddress
-            FROM radacct
-            WHERE nasipaddress IN (?, ?)
-            $whereServicioCentro
-            ORDER BY COALESCE(acctstoptime, acctupdatetime, acctstarttime) DESC, radacctid DESC
-            LIMIT 100
-        ";
-        $stmtSesionesCentro = $pdoRadiusRead->prepare($sqlSesionesCentro);
-        $stmtSesionesCentro->execute($parametrosCentro);
-        $sesionesCentroRadius = $stmtSesionesCentro->fetchAll();
-    } catch (Throwable $e) {
-        error_log('UBB Centro RADIUS: error de consulta radacct: ' . $e->getMessage());
-        $errorCentroRadius = 'No fue posible consultar radacct. Verifica los permisos de lectura del usuario SQL y la disponibilidad de la base radius.';
-        $sesionesCentroRadius = [];
-    }
-}
-
 
 /* SOLICITUDES: DATOS Y REGISTRO CONTROLADO */
 $relacionesSolicitud = [];
@@ -1820,13 +1705,6 @@ body[data-modulo="inicio"] #catalogo,
 body[data-modulo="inicio"] .dashboard-grid,
 body[data-modulo="inicio"] .module-placeholder{display:none!important}
 
-body[data-modulo="clientes"] #inicio,
-body[data-modulo="clientes"] .estadisticas,
-body[data-modulo="clientes"] #catalogo,
-body[data-modulo="clientes"] .module-placeholder{display:none!important}
-body[data-modulo="clientes"] .dashboard-grid{display:block!important}
-body[data-modulo="clientes"] .insights-column{display:none!important}
-
 body[data-modulo="catalogo"] #inicio,
 body[data-modulo="catalogo"] .estadisticas,
 body[data-modulo="catalogo"] .dashboard-grid,
@@ -1856,26 +1734,6 @@ body[data-modulo="historial"] .dashboard-grid,
 body[data-modulo="historial"] #moduloSolicitudes{display:none!important}
 body[data-modulo="historial"] #moduloHistorial{display:block!important}
 
-body[data-modulo="clientes"] .directorio-section{display:block!important}
-
-body[data-modulo="dhcp"] #inicio,
-body[data-modulo="dhcp"] .estadisticas,
-body[data-modulo="dhcp"] #catalogo,
-body[data-modulo="dhcp"] .dashboard-grid,
-body[data-modulo="dhcp"] #moduloSolicitudes,
-body[data-modulo="dhcp"] #moduloHistorial{display:none!important}
-body[data-modulo="dhcp"] #moduloDhcp{display:block!important}
-
-
-body[data-modulo="centro-radius"] #inicio,
-body[data-modulo="centro-radius"] .estadisticas,
-body[data-modulo="centro-radius"] #catalogo,
-body[data-modulo="centro-radius"] .dashboard-grid,
-body[data-modulo="centro-radius"] #moduloDhcp,
-body[data-modulo="centro-radius"] #moduloSolicitudes,
-body[data-modulo="centro-radius"] #moduloHistorial,
-body[data-modulo="centro-radius"] .module-placeholder:not(#moduloCentroRadius){display:none!important}
-body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
 
 .radius-panel{min-width:0}
 .radius-cabecera{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:18px}
@@ -2086,7 +1944,6 @@ body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Clientes y servicios</span>
-                <a class="nav-link<?= $moduloActual === 'clientes' ? ' active' : '' ?>" href="?modulo=clientes"><span class="nav-icon">◉</span>Clientes PPPoE</a>
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Planes y perfiles</span>
@@ -2095,7 +1952,6 @@ body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Monitoreo y control</span>
-                <a class="nav-link<?= $moduloActual === 'centro-radius' ? ' active' : '' ?>" href="?modulo=centro-radius"><span class="nav-icon">◉</span>Centro RADIUS</a>
                 <a class="nav-link<?= $moduloActual === 'radius-dhcp' ? ' active' : '' ?>" href="?modulo=radius-dhcp"><span class="nav-icon">⇄</span>Clientes DHCP RADIUS</a>
                 <a class="nav-link<?= $moduloActual === 'radius-pppoe' ? ' active' : '' ?>" href="?modulo=radius-pppoe"><span class="nav-icon">⇆</span>Clientes PPPoE RADIUS</a>
                 <a class="nav-link<?= $moduloActual === 'historial' || $moduloActual === 'solicitudes' ? ' active' : '' ?>" href="?modulo=historial"><span class="nav-icon">◷</span>Gestión de cambios</a>
@@ -2268,310 +2124,6 @@ body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
     </section>
 
             <div class="dashboard-grid">
-                <section class="directorio-section" id="clientes">
-        <section>
-
-            <h2 class="seccion-titulo">Directorio de clientes y servicios</h2>
-
-            <div class="panel panel-clientes">
-
-                <div class="directorio-nota">MikroTik aporta las cuentas y perfiles; Jamileth determina si existe una relación válida con cliente y servicio. Inventario se usa únicamente como contraste. Este directorio no modifica ninguna de esas fuentes.</div>
-                <?php if ($errorInventarioPppoe): ?>
-                    <div class="aviso">Inventario PPPoE: <?= escapar($errorInventarioPppoe) ?> La referencia de <code>clientes_servicios</code> no sustituye la consulta de <code>pppoe_secrets</code>.</div>
-                <?php endif; ?>
-
-                <div class="panel-cabecera">
-
-                    <div>
-
-                        <h2>Directorio de clientes</h2>
-
-                        <p>Consulta clientes, paquetes, velocidades y sus relaciones de servicio.</p>
-
-                    </div>
-
-                    <span class="etiqueta"><?= $totalClientes ?> registros</span>
-
-                </div>
-
-                <div class="barra-busqueda">
-
-                    <div class="buscador">
-
-                        <input type="search" id="buscarCliente" placeholder="Buscar usuario, id_servicio, plan, IP o MAC..." autocomplete="off">
-
-                    </div>
-
-                    <span class="contador" id="contadorVisible"><?= $totalClientes ?> registros</span>
-
-                    <button type="button" class="boton boton-secundario boton-exportar" id="exportarCSV">Exportar CSV</button>
-
-                </div>
-
-                <div class="filtros-rapidos" role="group" aria-label="Filtros rápidos de clientes">
-
-                    <button type="button" class="filtro-rapido activo" data-filtro-cliente="todos" aria-pressed="true">Todos <span class="filtro-cantidad"><?= $totalClientes ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="relacionado" aria-pressed="false">Relacionados <span class="filtro-cantidad"><?= $clientesRelacionados ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="pendiente" aria-pressed="false">Pendientes Jamileth <span class="filtro-cantidad"><?= $clientesPppoePendientes ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="sin_registro" aria-pressed="false">Sin registro Jamileth <span class="filtro-cantidad"><?= $clientesSinRegistroJamileth ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="duplicado" aria-pressed="false">Duplicados MikroTik <span class="filtro-cantidad"><?= $clientesDuplicadosMikrotik ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="conectado" aria-pressed="false">Conectados <span class="filtro-cantidad"><?= $totalConectados ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="habilitado" aria-pressed="false">Habilitados <span class="filtro-cantidad"><?= $clientesHabilitados ?></span></button>
-
-                    <button type="button" class="filtro-rapido" data-filtro-cliente="deshabilitado" aria-pressed="false">Deshabilitados <span class="filtro-cantidad"><?= $clientesDeshabilitados ?></span></button>
-
-                </div>
-
-                <div class="ayuda-tabla-clientes">↔ Desliza horizontalmente para consultar todas las columnas; los datos técnicos se mantienen en una sola línea.</div>
-
-                <div class="tabla-contenedor">
-
-                    <table>
-
-                        <thead>
-
-                        <tr>
-
-                            <th>Usuario / cliente</th>
-
-                            <th>id_servicio</th>
-
-                            <th>Paquete</th>
-
-                            <th>Precio mensual</th>
-
-                            <th>Velocidad</th>
-
-                            <th>Perfil PPPoE</th>
-
-                            <th>IP</th>
-
-                            <th>MAC (MikroTik)</th>
-
-                            <th>Relación Jamileth</th>
-
-                            <th>Inventario</th>
-
-                            <th>Estado cuenta</th>
-
-                            <th>Acción</th>
-
-                        </tr>
-
-                        </thead>
-
-                        <tbody id="tablaClientes">
-
-                        <?php if (!$clientes): ?>
-
-                            <tr><td colspan="12">No se encontraron cuentas PPPoE.</td></tr>
-
-                        <?php else: ?>
-
-                            <?php foreach ($clientes as $cliente): ?>
-
-                                <?php
-
-                                $busqueda = mb_strtolower(
-
-                                    implode(' ', [
-
-                                        $cliente['usuario'],
-
-                                        $cliente['nombre_cliente'],
-
-                                        $cliente['id_servicio'],
-
-                                        $cliente['plan'],
-
-                                        $cliente['precio_mensual'] ?? '',
-
-                                        $cliente['perfil'],
-
-                                        $cliente['velocidad_mostrar'] ?? $cliente['velocidad'],
-
-                                        $cliente['radius_rate_limit'] ?? '',
-
-                                        $cliente['radius_lista'] ?? '',
-
-                                        $cliente['remote_address'],
-
-                                        $cliente['caller_id'],
-                                        $cliente['estado_integracion'],
-                                        $cliente['estado_inventario'],
-                                        $cliente['duplicado_mikrotik'] ? 'duplicado' : '',
-
-                                    ]),
-
-                                    'UTF-8'
-
-                                );
-
-                                ?>
-
-                                <?php
-                                    $filtroRelacion = match ($cliente['estado_integracion']) {
-                                        'RELACIONADO', 'RELACIONADO_DHCP_PPPOE' => 'relacionado',
-                                        'PENDIENTE' => 'pendiente',
-                                        'SIN_REGISTRO_JAMILETH' => 'sin_registro',
-                                        'RELACION_AMBIGUA' => 'ambiguo',
-                                        'REVISAR_RELACION' => 'revisar',
-                                        default => 'no_verificable',
-                                    };
-                                    $etiquetaRelacion = match ($cliente['estado_integracion']) {
-                                        'RELACIONADO' => 'RELACIONADO',
-                                        'RELACIONADO_DHCP_PPPOE' => 'RELACIONADO · DHCP_PPPOE',
-                                        'PENDIENTE' => 'PENDIENTE EN JAMILETH',
-                                        'SIN_REGISTRO_JAMILETH' => 'SIN REGISTRO EN JAMILETH',
-                                        'RELACION_AMBIGUA' => 'RELACIÓN AMBIGUA',
-                                        'REVISAR_RELACION' => 'REVISAR RELACIÓN',
-                                        default => 'JAMILETH NO VERIFICABLE',
-                                    };
-                                    $claseRelacion = in_array($filtroRelacion, ['relacionado'], true)
-                                        ? 'relacionado'
-                                        : (in_array($filtroRelacion, ['pendiente'], true) ? 'pendiente' : 'estado-error');
-                                ?>
-                                <tr data-busqueda="<?= escapar($busqueda) ?>" data-estado="<?= $cliente['disabled'] ? 'deshabilitado' : 'habilitado' ?>" data-relacion="<?= escapar($filtroRelacion) ?>" data-duplicado="<?= !empty($cliente['duplicado_mikrotik']) ? '1' : '0' ?>" data-conectado="<?= isset($usuariosActivos[mb_strtolower(trim($cliente['usuario']), 'UTF-8')]) ? '1' : '0' ?>">
-
-                                    <td>
-
-                                        <div class="usuario-nombre"><?= escapar($cliente['usuario']) ?></div>
-
-                                        <?php if ($cliente['nombre_cliente'] !== ''): ?>
-
-                                            <div class="usuario-subtexto"><?= escapar($cliente['nombre_cliente']) ?></div>
-
-                                        <?php endif; ?>
-                                        <?php if (!empty($cliente['duplicado_mikrotik'])): ?>
-                                            <div class="usuario-subtexto"><strong>Nombre repetido en respuesta MikroTik</strong></div>
-                                        <?php endif; ?>
-
-                                    </td>
-
-                                    <td><?= escapar($cliente['id_servicio'] ?: 'SIN RELACIÓN') ?></td>
-
-                                    <td><span class="perfil-etiqueta"><?= escapar($cliente['plan']) ?></span></td>
-
-                                    <td>
-                                        <?php if ($cliente['precio_mensual'] !== null && $cliente['precio_mensual'] !== ''): ?>
-                                            $<?= number_format((float) $cliente['precio_mensual'], 2) ?>
-                                        <?php else: ?>
-                                            —
-                                        <?php endif; ?>
-                                    </td>
-
-                                    <td>
-                                        <?= escapar($cliente['velocidad_mostrar'] ?? $cliente['velocidad']) ?>
-                                        <?php if (!empty($cliente['radius_identidad_confirmada'])): ?>
-                                            <div class="usuario-subtexto">RADIUS confirmado</div>
-                                        <?php endif; ?>
-                                    </td>
-
-                                    <td><?= escapar($cliente['perfil']) ?></td>
-
-                                    <td><?= escapar($cliente['remote_address'] ?: '—') ?></td>
-
-                                    <td><?= escapar($cliente['caller_id'] ?: 'MAC no disponible') ?></td>
-
-                                    <td>
-                                        <span class="estado <?= $claseRelacion ?>">
-                                            <?= escapar($etiquetaRelacion) ?>
-                                        </span>
-                                    </td>
-
-                                    <td>
-                                        <span class="estado <?= str_starts_with($cliente['estado_inventario'], 'EN ') || str_starts_with($cliente['estado_inventario'], 'REFERENCIA ') ? 'relacionado' : 'pendiente' ?>">
-                                            <?= escapar($cliente['estado_inventario']) ?>
-                                        </span>
-                                    </td>
-
-                                    <td>
-
-                                        <span class="estado <?= $cliente['disabled'] ? 'inactivo' : 'activo' ?>">
-
-                                            <?= $cliente['disabled'] ? 'Deshabilitada' : 'Habilitada' ?>
-
-                                        </span>
-
-                                    </td>
-
-                                    <td>
-
-                                        <button
-
-                                            type="button"
-
-                                            class="boton boton-rosa boton-ver-planes"
-
-                                            data-usuario="<?= escapar($cliente['usuario']) ?>"
-
-                                            data-id-servicio="<?= escapar($cliente['id_servicio']) ?>"
-
-                                            data-service="<?= escapar($cliente['service']) ?>"
-
-                                            data-perfil="<?= escapar($cliente['perfil']) ?>"
-
-                                            data-plan="<?= escapar($cliente['plan']) ?>"
-                                            data-precio="<?= ($cliente['precio_mensual'] ?? '') !== '' ? escapar(number_format((float)$cliente['precio_mensual'], 2, '.', ',')) : '' ?>"
-
-                                            data-velocidad="<?= escapar($cliente['velocidad']) ?>"
-
-                                            data-radius-confirmada="<?= !empty($cliente['radius_identidad_confirmada']) ? '1' : '0' ?>"
-
-                                            data-radius-velocidad="<?= escapar($cliente['radius_rate_limit'] ?? '') ?>"
-
-                                            data-radius-lista="<?= escapar($cliente['radius_lista'] ?? '') ?>"
-
-                                            data-radius-username="<?= escapar($cliente['radius_username'] ?? '') ?>"
-
-                                            data-ip="<?= escapar($cliente['remote_address']) ?>"
-
-                                            data-mac="<?= escapar($cliente['caller_id']) ?>"
-
-                                            data-disabled="<?= $cliente['disabled'] ? '1' : '0' ?>"
-
-                                        >Consultar</button>
-
-                                    </td>
-
-                                </tr>
-
-                            <?php endforeach; ?>
-
-                        <?php endif; ?>
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-                <div class="controles-tabla">
-                    <div class="desplazamiento-tabla" aria-label="Desplazamiento horizontal de la tabla">
-                        <span class="ayuda-desplazamiento">Mover tabla</span>
-                        <button type="button" class="boton-flecha-tabla" id="desplazarIzquierda" aria-label="Desplazar tabla hacia la izquierda" title="Desplazar a la izquierda">←</button>
-                        <button type="button" class="boton-flecha-tabla" id="desplazarDerecha" aria-label="Desplazar tabla hacia la derecha" title="Desplazar a la derecha">→</button>
-                    </div>
-                    <nav class="paginacion" aria-label="Paginación de clientes">
-                        <div class="paginacion-resumen" id="resumenPaginacion">Mostrando clientes</div>
-                        <div class="paginacion-controles">
-                            <button type="button" class="boton-paginacion" id="paginaAnterior" aria-label="Página anterior">← Anterior</button>
-                            <span class="pagina-indicador" id="indicadorPagina" aria-live="polite">Página 1 de 1</span>
-                            <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguiente" aria-label="Página siguiente">Siguiente →</button>
-                        </div>
-                    </nav>
-                </div>
-
-
-            </div>
-
-        </section>
-                </section>
         <aside class="insights-column">
             <section class="panel insight-panel" id="perfiles">
                 <div class="panel-cabecera">
@@ -2823,177 +2375,6 @@ body[data-modulo="centro-radius"] #moduloCentroRadius{display:block!important}
 </section>
 
 
-<section class="module-placeholder radius-panel" id="moduloCentroRadius">
-    <div class="radius-cabecera">
-        <div>
-            <span class="module-tag">Monitoreo · Solo lectura</span>
-            <h2>Centro RADIUS</h2>
-            <p>UBB-COMUNICACIONES · Monitoreo de autenticaciones y accounting.</p>
-        </div>
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-            <span class="radius-estado <?= (!$errorConsultaRadius && !$errorCentroRadius) ? '' : 'sin-registros' ?>">
-                <?= (!$errorConsultaRadius && !$errorCentroRadius) ? 'Base radius conectada' : 'Consulta RADIUS pendiente' ?>
-            </span>
-            <a class="boton boton-secundario" href="?modulo=centro-radius<?= $servicioCentroRadius !== 'todos' ? '&servicio=' . escapar($servicioCentroRadius) : '' ?>">↻ Actualizar</a>
-        </div>
-    </div>
-
-    <?php if ($errorCentroRadius): ?>
-        <div class="aviso error"><?= escapar($errorCentroRadius) ?></div>
-    <?php endif; ?>
-
-    <div class="radius-resumen">
-        <?php foreach (['pppoe', 'dhcp'] as $tipoCentro): ?>
-            <?php $nasCentro = $resumenCentroRadius[$tipoCentro]; ?>
-            <article class="radius-nas-card">
-                <div class="radius-nas-top">
-                    <span class="radius-nas-tipo"><?= $tipoCentro === 'pppoe' ? 'PPPoE' : 'DHCP' ?></span>
-                    <span class="radius-estado <?= $nasCentro['total'] > 0 ? '' : 'sin-registros' ?>">
-                        <?= $nasCentro['total'] > 0 ? 'Registros encontrados' : 'Sin registros' ?>
-                    </span>
-                </div>
-                <h3><?= escapar($nasCentro['nombre']) ?></h3>
-                <div class="radius-nas-ip">NAS <?= escapar($nasCentro['nas']) ?></div>
-                <div class="radius-nas-stats">
-                    <div class="radius-nas-stat">
-                        <small>Sesiones registradas</small>
-                        <strong><?= (int) $nasCentro['total'] ?></strong>
-                    </div>
-                    <div class="radius-nas-stat">
-                        <small>Abiertas en accounting</small>
-                        <strong><?= (int) $nasCentro['abiertas'] ?></strong>
-                    </div>
-                </div>
-                <div class="radius-ultima">
-                    <?php if (!empty($nasCentro['ultima_abierta'])): ?>
-                        <strong>Último registro sin Stop:</strong><br>
-                        <?= escapar($nasCentro['ultima_abierta']['username'] ?? '—') ?><br>
-                        IP <?= escapar($nasCentro['ultima_abierta']['framedipaddress'] ?? '—') ?>
-                        · <?= escapar($nasCentro['ultima_abierta']['nasportid'] ?? '—') ?>
-                        <?php
-                            $identidadUltimaCentro = strtoupper(trim((string) ($nasCentro['ultima_abierta']['username'] ?? '')));
-                            $rateUltimoCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Rate-Limit'] ?? [];
-                            $listaUltimaCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Address-List'] ?? [];
-                            $grupoUltimoCentro = $atributosRadius[$identidadUltimaCentro]['Mikrotik-Group'] ?? [];
-                        ?>
-                        <?php if (!empty($rateUltimoCentro)): ?>
-                            <br>Rate-limit RADIUS: <?= escapar((string) $rateUltimoCentro[0]) ?>
-                        <?php endif; ?>
-                        <?php if (!empty($listaUltimaCentro)): ?>
-                            <br>Address-list RADIUS: <?= escapar((string) $listaUltimaCentro[0]) ?>
-                        <?php endif; ?>
-                        <?php if (!empty($grupoUltimoCentro)): ?>
-                            <br>Grupo PPP RADIUS: <?= escapar((string) $grupoUltimoCentro[0]) ?>
-                        <?php endif; ?>
-                    <?php elseif ($nasCentro['ultima']): ?>
-                        <strong>Última actividad registrada:</strong><br><?= escapar(formatearFechaRadius($nasCentro['ultima'])) ?>
-                    <?php else: ?>
-                        Sin actividad registrada en radacct.
-                    <?php endif; ?>
-                </div>
-            </article>
-        <?php endforeach; ?>
-    </div>
-
-    <div class="radius-nota">
-        <strong>Cómo interpretar los estados:</strong> “Abierta en accounting” significa que la fila de <code>radacct</code> tiene <code>acctstoptime IS NULL</code>. No confirma por sí sola que el equipo siga conectado en tiempo real; para eso debe contrastarse con el estado del MikroTik correspondiente. Esta pantalla no modifica RADIUS, SQL ni routers.
-    </div>
-
-    <div class="panel panel-clientes">
-        <div class="panel-cabecera">
-            <div>
-                <h2>Actividad de autenticación</h2>
-                <p>Últimos registros de sesiones PPPoE y DHCP almacenados en <code>radius.radacct</code>.</p>
-            </div>
-            <span class="etiqueta"><?= count($sesionesCentroRadius) ?> registros cargados · máximo 100</span>
-        </div>
-
-        <div class="radius-filtros">
-            <div class="radius-filtros-grupo" role="group" aria-label="Filtrar actividad RADIUS">
-                <a class="radius-filtro <?= $servicioCentroRadius === 'todos' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=todos">Todos</a>
-                <a class="radius-filtro <?= $servicioCentroRadius === 'pppoe' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=pppoe">PPPoE</a>
-                <a class="radius-filtro <?= $servicioCentroRadius === 'dhcp' ? 'activo' : '' ?>" href="?modulo=centro-radius&servicio=dhcp">DHCP</a>
-            </div>
-            <span class="contador">Filtro: <?= escapar(strtoupper($servicioCentroRadius)) ?></span>
-        </div>
-
-        <?php if ($errorCentroRadius): ?>
-            <div class="radius-vacio">No se pudieron consultar las sesiones. Revisa el permiso SELECT sobre <code>radius.radacct</code>.</div>
-        <?php elseif (!$sesionesCentroRadius): ?>
-            <div class="radius-vacio">No se encontraron registros para el filtro seleccionado.</div>
-        <?php else: ?>
-            <div class="tabla-contenedor radius-tabla">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Servicio</th>
-                            <th>Identificador</th>
-                            <th>Usuario / MAC</th>
-                            <th>NAS / interfaz</th>
-                            <th>IP asignada</th>
-                            <th>Inicio / cierre</th>
-                            <th>Duración</th>
-                            <th>Tráfico entrada / salida</th>
-                            <th>Estado</th>
-                        </tr>
-                    </thead>
-                    <tbody id="tablaRadius">
-                        <?php foreach ($sesionesCentroRadius as $sesionCentro): ?>
-                            <?php
-                                $nasFilaCentro = (string) ($sesionCentro['nasipaddress'] ?? '');
-                                $esPppoeCentro = $nasFilaCentro === '10.0.2.230';
-                                $tipoFilaCentro = $esPppoeCentro ? 'PPPoE' : 'DHCP';
-                                $abiertaCentro = empty($sesionCentro['acctstoptime']);
-                                $entradaCentro = (float) ($sesionCentro['acctinputoctets'] ?? 0);
-                                $salidaCentro = (float) ($sesionCentro['acctoutputoctets'] ?? 0);
-                            ?>
-                            <tr>
-                                <td><span class="perfil-etiqueta"><?= escapar($tipoFilaCentro) ?></span></td>
-                                <td>
-                                    <strong><?= escapar($sesionCentro['acctsessionid'] ?: '—') ?></strong>
-                                    <span class="radius-secundario">Fila #<?= (int) $sesionCentro['radacctid'] ?></span>
-                                </td>
-                                <td>
-                                    <strong><?= escapar($sesionCentro['username'] ?: '—') ?></strong>
-                                    <span class="radius-secundario"><?= escapar($sesionCentro['callingstationid'] ?: '') ?></span>
-                                </td>
-                                <td>
-                                    <?= escapar($nasFilaCentro) ?>
-                                    <span class="radius-secundario"><?= escapar($sesionCentro['nasportid'] ?: 'Interfaz no indicada') ?></span>
-                                </td>
-                                <td><?= escapar($sesionCentro['framedipaddress'] ?: '—') ?></td>
-                                <td>
-                                    <?= escapar(formatearFechaRadius($sesionCentro['acctstarttime'])) ?>
-                                    <span class="radius-secundario">Cierre: <?= escapar(formatearFechaRadius($sesionCentro['acctstoptime'])) ?></span>
-                                </td>
-                                <td><?= $abiertaCentro ? 'Sin Stop' : escapar(formatearDuracionRadius($sesionCentro['acctsessiontime'])) ?></td>
-                                <td>
-                                    <?= number_format($entradaCentro / 1048576, 2) ?> MB
-                                    <span class="radius-secundario">Salida: <?= number_format($salidaCentro / 1048576, 2) ?> MB</span>
-                                </td>
-                                <td>
-                                    <span class="estado <?= $abiertaCentro ? 'estado-ok' : 'estado-pendiente' ?>">
-                                        <?= $abiertaCentro ? 'Abierta en accounting' : 'Cerrada' ?>
-                                    </span>
-                                    <span class="radius-secundario">Autenticación: <?= escapar($sesionCentro['acctauthentic'] ?: 'No indicada') ?></span>
-                                </td>
-                            </tr>
-                        <?php endforeach; ?>
-                    </tbody>
-                </table>
-            </div>
-            <nav class="paginacion paginacion-listado" id="paginacionRadius" aria-label="Paginación de sesiones RADIUS">
-                <div class="paginacion-resumen" id="resumenPaginacionRadius">Mostrando registros</div>
-                <div class="paginacion-controles">
-                    <button type="button" class="boton-paginacion" id="paginaAnteriorRadius" aria-label="Página anterior de RADIUS">← Anterior</button>
-                    <span class="pagina-indicador" id="indicadorPaginaRadius" aria-live="polite">Página 1 de 1</span>
-                    <button type="button" class="boton-paginacion boton-paginacion-principal" id="paginaSiguienteRadius" aria-label="Página siguiente de RADIUS">Siguiente →</button>
-                </div>
-            </nav>
-        <?php endif; ?>
-    </div>
-</section>
-
             <footer class="pie">UBB Comunicaciones · Gestión de clientes, paquetes, perfiles y velocidades · Modo consulta</footer>
         </main>
     </div>
@@ -3220,6 +2601,7 @@ if (lienzoGrafica) {
 
 }
 
+if (document.getElementById('tablaClientes')) { // la tabla de clientes ya no existe en el portal
 const buscador = document.getElementById('buscarCliente');
 const filas = Array.from(document.querySelectorAll('#tablaClientes tr[data-busqueda]'));
 const contadorVisible = document.getElementById('contadorVisible');
@@ -3363,6 +2745,7 @@ if (envolturaTabla) {
 }
 
 dibujarPagina();
+} // fin tabla de clientes
 
 const modal = document.getElementById('modalPlanes');
 
