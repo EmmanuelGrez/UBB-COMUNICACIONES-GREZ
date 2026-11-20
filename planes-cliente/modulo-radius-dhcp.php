@@ -594,6 +594,30 @@ if ($pdoRd instanceof PDO) {
     }
 }
 
+/* Quién suspendió a cada cliente (UISP o el panel) y desde cuándo */
+$origenSuspRd = [];
+if ($pdoRd instanceof PDO && $tablaSuspensionesRd) {
+    try {
+        foreach ($pdoRd->query("SELECT username, origen, fecha FROM ubb_suspensiones") as $s) {
+            $origenSuspRd[(string) $s['username']] = ['origen' => strtoupper((string) ($s['origen'] ?? 'PANEL')), 'fecha' => (string) ($s['fecha'] ?? '')];
+        }
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS DHCP: sin origen de suspensiones: ' . $e->getMessage());
+    }
+}
+
+/* Historial de esta VLAN (últimos cambios hechos desde el panel) */
+$historialRd = [];
+if ($pdoRd instanceof PDO) {
+    try {
+        $st = $pdoRd->prepare("SELECT fecha, mac, ip, accion, detalle, origen FROM ubb_bitacora WHERE ip LIKE ? ORDER BY id DESC LIMIT 40");
+        $st->execute([$cfgRd['prefijo'] . '%']);
+        $historialRd = $st->fetchAll();
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS DHCP: sin historial: ' . $e->getMessage());
+    }
+}
+
 $totalRd = count($clientesRd);
 $suspendidosRd = count(array_filter($clientesRd, fn ($c) => $c['lista'] === RD_LISTA_DEUDORES));
 $enLineaRd = count(array_filter($clientesRd, fn ($c) => !empty($c['sesion_desde'])));
@@ -603,78 +627,9 @@ if ($pdoRd instanceof PDO) {
     try { $firmaRd = rdFirmaEstado($pdoRd); } catch (Throwable $e) { $firmaRd = ''; }
 }
 
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+require_once __DIR__ . '/layout-portal.php';
+portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cliente. Los cambios se guardan en RADIUS y se aplican al momento en el router.', 'radius-dhcp');
 ?>
-<!doctype html>
-<html lang="es">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Clientes DHCP RADIUS | UBB Comunicaciones</title>
-    <style>
-        *{box-sizing:border-box}
-        body{margin:0;padding:24px;background:#f5f3f8;color:#292333;font-family:Arial,sans-serif}
-        main{max-width:1100px;margin:0 auto}
-        a{color:#60418e}
-        h1{margin:12px 0 4px;color:#49366b}
-        .sub{margin:0 0 18px;color:#5d5666;font-size:14px}
-        .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-        .tab{padding:8px 16px;border-radius:999px;background:#fff;border:1px solid #d9cfe6;text-decoration:none;font-weight:bold}
-        .tab.activo{background:#6945a2;color:#fff;border-color:#6945a2}
-        .tab small{display:inline-block;margin-left:4px;padding:1px 7px;border-radius:999px;background:#efe9f7;color:#49366b;font-size:11px}
-        .tab.activo small{background:rgba(255,255,255,.22);color:#fff}
-        .general{display:flex;flex-wrap:wrap;gap:22px;align-items:center;background:#49366b;color:#fff;border-radius:14px;padding:14px 20px;margin-bottom:16px}
-        .general b{display:block;font-size:24px}
-        .general span{font-size:12px;opacity:.85}
-        .general .g-total b{font-size:34px}
-        .general .g-total{padding-right:22px;border-right:1px solid rgba(255,255,255,.25)}
-        .general .g-planes{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-        .general em{font-style:normal;background:rgba(255,255,255,.15);padding:4px 10px;border-radius:999px;font-size:13px;font-weight:bold}
-        .resumen{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
-        .tarjeta{background:#fff;border:1px solid #e8e1ef;border-radius:12px;padding:14px}
-        .tarjeta b{display:block;font-size:26px;color:#49366b}
-        .tarjeta span{font-size:13px;color:#5d5666}
-        .caja{background:#fff;border:1px solid #e8e1ef;border-radius:14px;padding:18px;margin-bottom:16px}
-        .mensaje,.error,.aviso{padding:12px 14px;border-radius:10px;margin-bottom:14px;font-size:14px}
-        .mensaje{background:#eaf7ee;color:#185b31}
-        .error{background:#fff0f0;color:#8a2424}
-        .aviso{background:#fff8e6;color:#6b4e00}
-        table{width:100%;border-collapse:collapse;font-size:14px}
-        th,td{padding:10px 8px;border-bottom:1px solid #eee7f4;text-align:left;vertical-align:middle}
-        th{font-size:12px;text-transform:uppercase;color:#6d6478}
-        .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:bold}
-        .ok{background:#eaf7ee;color:#185b31}
-        .susp{background:#fff0f0;color:#8a2424}
-        .gris{background:#f0edf4;color:#6d6478}
-        button{padding:8px 14px;border:0;border-radius:8px;font-weight:bold;cursor:pointer}
-        .b-susp{background:#c0392b;color:#fff}
-        .b-react{background:#1e8449;color:#fff}
-        .b-plan{background:#6945a2;color:#fff}
-        .acciones{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
-        .acciones form.inline{display:flex;gap:6px;align-items:center}
-        select{padding:7px 8px;border:1px solid #cfc5dc;border-radius:8px;font-size:14px;background:#fff}
-        .b-alta{background:#6945a2;color:#fff;padding:11px 18px}
-        form.inline{margin:0}
-        .alta{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}
-        label{display:block;font-size:13px;font-weight:bold;margin-bottom:6px}
-        input{width:100%;padding:10px;border:1px solid #cfc5dc;border-radius:8px;font-size:15px;font-family:monospace}
-        .mono{font-family:monospace}
-        @media (max-width:760px){
-            body{padding:12px}
-            .alta{grid-template-columns:1fr}
-            table,thead,tbody,tr,td{display:block}
-            thead{display:none}
-            tr{border:1px solid #e8e1ef;border-radius:12px;margin-bottom:10px;padding:6px;background:#fff}
-            td{border:0;padding:6px 8px}
-            td[data-t]::before{content:attr(data-t) ": ";font-weight:bold;color:#6d6478}
-        }
-    </style>
-</head>
-<body>
-<main>
-    <a href="?modulo=inicio">← Volver al portal</a>
-    <h1>Clientes DHCP en RADIUS</h1>
-    <p class="sub">IP fija, plan y suspensión de cada cliente. Los cambios se guardan en RADIUS y se aplican al momento en el router.</p>
 
     <section class="general">
         <div class="g-total"><b><?= $globalRd['total'] ?></b><span>servicios DHCP en total<br><?= count($vlansRadiusDhcp) ?> VLAN</span></div>
@@ -714,30 +669,60 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     </section>
 
     <section class="caja">
+        <div class="barra">
+            <input id="buscar" type="search" placeholder="Buscar IP, MAC o nombre" autocomplete="off">
+            <select id="f-estado" aria-label="Estado">
+                <option value="">Todos</option>
+                <option value="activo">Activos</option>
+                <option value="susp">Suspendidos</option>
+                <option value="susp-uisp">Suspendidos por UISP</option>
+                <option value="susp-panel">Suspendidos desde el panel</option>
+                <option value="linea">En línea</option>
+                <option value="fuera">Sin sesión</option>
+                <option value="sinrel">Sin relación</option>
+            </select>
+            <select id="f-plan" aria-label="Plan">
+                <option value="">Todos los planes</option>
+                <?php foreach ($planesRd as $planOp): ?><option value="<?= escapar($planOp) ?>"><?= escapar(strtok($planOp, '_')) ?></option><?php endforeach; ?>
+            </select>
+            <span class="cuenta" id="cuenta"></span>
+        </div>
+        <div class="tabla">
         <table>
             <thead><tr><th>IP fija</th><th>MAC</th><th>Cliente</th><th>Estado</th><th>Sesión</th><th></th></tr></thead>
-            <tbody>
+            <tbody id="filas">
             <?php if ($clientesRd === []): ?>
                 <tr><td colspan="6">No hay clientes de esta VLAN en RADIUS.</td></tr>
             <?php endif; ?>
             <?php foreach ($clientesRd as $c):
-                $suspendido = $c['lista'] === RD_LISTA_DEUDORES; ?>
-                <tr>
+                $suspendido = $c['lista'] === RD_LISTA_DEUDORES;
+                $susp = $origenSuspRd[$c['mac']] ?? null;
+                $porUisp = $suspendido && ($susp['origen'] ?? '') === 'UISP';
+                $sinRel = ($c['nombre'] ?? '') === '';
+                $enLinea = !empty($c['sesion_desde']);
+                $velocidad = (int) strtok((string) $c['lista'], 'M');
+                $estados = [$suspendido ? 'susp' : 'activo', $enLinea ? 'linea' : 'fuera'];
+                if ($suspendido) $estados[] = $porUisp ? 'susp-uisp' : 'susp-panel';
+                if ($sinRel) $estados[] = 'sinrel';
+            ?>
+                <tr data-buscar="<?= escapar(strtolower($c['ip'] . ' ' . $c['mac'] . ' ' . ($c['nombre'] ?? ''))) ?>"
+                    data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['lista']) ?>">
                     <td data-t="IP" class="mono"><b><?= escapar($c['ip']) ?></b></td>
                     <td data-t="MAC" class="mono"><?= escapar($c['mac']) ?></td>
-                    <td data-t="Cliente"><?= escapar(($c['nombre'] ?? '') !== '' ? $c['nombre'] : '— sin relación —') ?></td>
+                    <td data-t="Cliente"><?= $sinRel ? '<span class="tenue">— sin relación —</span>' : escapar($c['nombre']) ?></td>
                     <td data-t="Estado">
                         <?php if ($suspendido): ?>
                             <span class="pill susp">Suspendido</span>
+                            <small class="bloque">por <?= $porUisp ? 'UISP' : 'el panel' ?><?= ($susp['fecha'] ?? '') !== '' ? ' · ' . escapar(date('d/m H:i', strtotime($susp['fecha']))) : '' ?></small>
                         <?php else: ?>
-                            <span class="pill ok">Activo · <?= escapar($c['lista'] ?: 'sin plan') ?></span>
+                            <span class="pill plan v<?= $velocidad >= 60 ? 60 : ($velocidad >= 30 ? 30 : 20) ?>"><?= escapar(strtok((string) ($c['lista'] ?: 'sin plan'), '_')) ?></span>
                         <?php endif; ?>
                     </td>
                     <td data-t="Sesión">
-                        <?php if (!empty($c['sesion_desde'])): ?>
-                            <span class="pill ok">En línea</span> <small>desde <?= escapar(date('d/m H:i', strtotime((string) $c['sesion_desde']))) ?></small>
+                        <?php if ($enLinea): ?>
+                            <span class="punto ok"></span>En línea <small class="bloque">desde <?= escapar(date('d/m H:i', strtotime((string) $c['sesion_desde']))) ?></small>
                         <?php else: ?>
-                            <span class="pill gris">Sin sesión</span>
+                            <span class="punto gris"></span><span class="tenue">Sin sesión</span>
                         <?php endif; ?>
                     </td>
                     <td><div class="acciones">
@@ -755,6 +740,9 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
                             <button class="b-plan" type="submit">Cambiar</button>
                         </form>
                         <?php endif; ?>
+                        <?php if ($porUisp): ?>
+                            <span class="pill uisp" title="UISP lo tiene bloqueado. Si se reactiva aquí, el sincronizador lo vuelve a suspender en un minuto.">Reactivar en UISP</span>
+                        <?php else: ?>
                         <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
                               onsubmit="return confirm('<?= $suspendido ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($c['ip']) ?> (<?= escapar($c['mac']) ?>)?');">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
@@ -765,15 +753,18 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
                                 <button class="b-susp" name="accion" value="suspender">Suspender</button>
                             <?php endif; ?>
                         </form>
+                        <?php endif; ?>
                     </div></td>
                 </tr>
             <?php endforeach; ?>
+            <tr id="sin-resultados" style="display:none"><td colspan="6" class="tenue">Ningún cliente coincide con la búsqueda.</td></tr>
             </tbody>
         </table>
+        </div>
     </section>
 
-    <section class="caja">
-        <h2 style="margin-top:0;color:#49366b;font-size:18px">Dar de alta un cliente en la VLAN <?= escapar($vlanRd) ?></h2>
+    <details class="caja plegable">
+        <summary>Dar de alta un cliente en la VLAN <?= escapar($vlanRd) ?></summary>
         <form class="alta" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
               onsubmit="return confirm('¿Dar de alta esta MAC con esa IP fija?');">
             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
@@ -789,16 +780,37 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
             <button class="b-alta" type="submit">Dar de alta</button>
         </form>
         <p class="sub" style="margin:10px 0 0">Se sugiere la siguiente IP libre. Plan asignado: <b><?= escapar($cfgRd['lista']) ?></b>.</p>
-    </section>
+    </details>
 
-    <div class="aviso">
-        <b>Importante:</b> mientras UISP siga suspendiendo a estos clientes, un cliente reactivado aquí puede seguir bloqueado por UISP (y al revés).
-        Este portal no tiene inicio de sesión individual todavía; cualquiera que lo abra puede usar estos botones.
-    </div>
+    <details class="caja plegable">
+        <summary>Historial de cambios en la VLAN <?= escapar($vlanRd) ?> <small>(últimos <?= count($historialRd) ?>)</small></summary>
+        <?php if ($historialRd === []): ?>
+            <p class="tenue">Todavía no hay cambios registrados desde el panel en esta VLAN.</p>
+        <?php else: ?>
+        <div class="tabla">
+        <table class="historial">
+            <thead><tr><th>Fecha</th><th>IP</th><th>Acción</th><th>Detalle</th><th>Origen</th></tr></thead>
+            <tbody>
+            <?php foreach ($historialRd as $h): ?>
+                <tr>
+                    <td data-t="Fecha"><?= escapar(date('d/m H:i', strtotime((string) $h['fecha']))) ?></td>
+                    <td data-t="IP" class="mono"><?= escapar($h['ip']) ?></td>
+                    <td data-t="Acción"><span class="pill acc-<?= escapar(preg_replace('/[^a-z_]/', '', (string) $h['accion'])) ?>"><?= escapar(str_replace('_', ' ', (string) $h['accion'])) ?></span></td>
+                    <td data-t="Detalle"><?= escapar($h['detalle']) ?></td>
+                    <td data-t="Origen" class="tenue"><?= escapar($h['origen']) ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        </div>
+        <?php endif; ?>
+    </details>
+
+    <p class="nota">Lo que suspende UISP se reactiva en UISP: el panel lo refleja solo en unos minutos. Este portal todavía no tiene usuarios individuales.</p>
     <div id="hay-cambios" class="aviso" style="display:none;position:fixed;bottom:16px;left:50%;transform:translateX(-50%);box-shadow:0 4px 16px rgba(0,0,0,.15);z-index:9">
         Hubo cambios (por ejemplo, una suspensión desde UISP). <a href="?modulo=radius-dhcp&vlan=<?= rawurlencode($vlanRd) ?>">Actualizar ahora</a>
     </div>
-</main>
+<?php portalFin(); ?>
 <script>
 (function () {
     var firma = <?= json_encode($firmaRd) ?>;
@@ -822,6 +834,36 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
             })
             .catch(function () {});
     }, 20000);
+})();
+</script>
+<script>
+(function () {
+    var filas = Array.prototype.slice.call(document.querySelectorAll('#filas tr[data-buscar]'));
+    var buscar = document.getElementById('buscar'), estado = document.getElementById('f-estado'),
+        plan = document.getElementById('f-plan'), cuenta = document.getElementById('cuenta'),
+        vacio = document.getElementById('sin-resultados'), clave = 'filtros-radius-dhcp-<?= rawurlencode($vlanRd) ?>';
+    if (!buscar) return;
+    try {
+        var guardado = JSON.parse(sessionStorage.getItem(clave) || '{}');
+        buscar.value = guardado.q || ''; estado.value = guardado.e || ''; plan.value = guardado.p || '';
+    } catch (e) {}
+    function filtrar() {
+        var q = buscar.value.trim().toLowerCase(), e = estado.value, p = plan.value, n = 0;
+        filas.forEach(function (tr) {
+            var ver = (!q || tr.dataset.buscar.indexOf(q) !== -1)
+                && (!e || (' ' + tr.dataset.estado + ' ').indexOf(' ' + e + ' ') !== -1)
+                && (!p || tr.dataset.plan === p);
+            tr.style.display = ver ? '' : 'none';
+            if (ver) n++;
+        });
+        cuenta.textContent = n + ' de ' + filas.length + ' clientes';
+        if (vacio) vacio.style.display = (filas.length && !n) ? '' : 'none';
+        try { sessionStorage.setItem(clave, JSON.stringify({q: buscar.value, e: estado.value, p: plan.value})); } catch (err) {}
+    }
+    buscar.addEventListener('input', filtrar);
+    estado.addEventListener('change', filtrar);
+    plan.addEventListener('change', filtrar);
+    filtrar();
 })();
 </script>
 </body>

@@ -116,96 +116,9 @@ foreach ($clientesPp as $c) {
 }
 uksort($porPlanPp, fn ($a, $b) => ((int) $a ?: 999) <=> ((int) $b ?: 999));
 
-header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+require_once __DIR__ . '/layout-portal.php';
+portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_ROUTER . '): IP fija, plan, conexión y bloqueos.', 'radius-pppoe');
 ?>
-<!doctype html>
-<html lang="es">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Clientes PPPoE RADIUS | UBB Comunicaciones</title>
-    <style>
-        *{box-sizing:border-box}
-        body{margin:0;padding:24px;background:#f5f3f8;color:#292333;font-family:Arial,sans-serif}
-        main{max-width:1100px;margin:0 auto}
-        a{color:#60418e}
-        h1{margin:12px 0 4px;color:#49366b}
-        .sub{margin:0 0 18px;color:#5d5666;font-size:14px}
-        .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
-        .tab{padding:8px 16px;border-radius:999px;background:#fff;border:1px solid #d9cfe6;text-decoration:none;font-weight:bold}
-        .tab.activo{background:#6945a2;color:#fff;border-color:#6945a2}
-        .tab small{display:inline-block;margin-left:4px;padding:1px 7px;border-radius:999px;background:#efe9f7;color:#49366b;font-size:11px}
-        .tab.activo small{background:rgba(255,255,255,.22);color:#fff}
-        .general{display:flex;flex-wrap:wrap;gap:22px;align-items:center;background:#49366b;color:#fff;border-radius:14px;padding:14px 20px;margin-bottom:16px}
-        .general b{display:block;font-size:24px}
-        .general span{font-size:12px;opacity:.85}
-        .general .g-total b{font-size:34px}
-        .general .g-total{padding-right:22px;border-right:1px solid rgba(255,255,255,.25)}
-        .general .g-planes{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-        .general em{font-style:normal;background:rgba(255,255,255,.15);padding:4px 10px;border-radius:999px;font-size:13px;font-weight:bold}
-        .resumen{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
-        .tarjeta{background:#fff;border:1px solid #e8e1ef;border-radius:12px;padding:14px}
-        .tarjeta b{display:block;font-size:26px;color:#49366b}
-        .tarjeta span{font-size:13px;color:#5d5666}
-        .caja{background:#fff;border:1px solid #e8e1ef;border-radius:14px;padding:18px;margin-bottom:16px}
-        .mensaje,.error,.aviso{padding:12px 14px;border-radius:10px;margin-bottom:14px;font-size:14px}
-        .mensaje{background:#eaf7ee;color:#185b31}
-        .error{background:#fff0f0;color:#8a2424}
-        .aviso{background:#fff8e6;color:#6b4e00}
-        table{width:100%;border-collapse:collapse;font-size:14px}
-        th,td{padding:10px 8px;border-bottom:1px solid #eee7f4;text-align:left;vertical-align:middle}
-        th{font-size:12px;text-transform:uppercase;color:#6d6478}
-        .pill{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:bold}
-        .ok{background:#eaf7ee;color:#185b31}
-        .susp{background:#fff0f0;color:#8a2424}
-        .gris{background:#f0edf4;color:#6d6478}
-        button{padding:8px 14px;border:0;border-radius:8px;font-weight:bold;cursor:pointer}
-        .b-susp{background:#c0392b;color:#fff}
-        .b-react{background:#1e8449;color:#fff}
-        .b-plan{background:#6945a2;color:#fff}
-        .acciones{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:flex-end}
-        .acciones form.inline{display:flex;gap:6px;align-items:center}
-        select{padding:7px 8px;border:1px solid #cfc5dc;border-radius:8px;font-size:14px;background:#fff}
-        .b-alta{background:#6945a2;color:#fff;padding:11px 18px}
-        form.inline{margin:0}
-        .alta{display:grid;grid-template-columns:1fr 1fr auto;gap:10px;align-items:end}
-        label{display:block;font-size:13px;font-weight:bold;margin-bottom:6px}
-        input{width:100%;padding:10px;border:1px solid #cfc5dc;border-radius:8px;font-size:15px;font-family:monospace}
-        .mono{font-family:monospace}
-        @media (max-width:760px){
-            body{padding:12px}
-            .alta{grid-template-columns:1fr}
-            table,thead,tbody,tr,td{display:block}
-            thead{display:none}
-            tr{border:1px solid #e8e1ef;border-radius:12px;margin-bottom:10px;padding:6px;background:#fff}
-            td{border:0;padding:6px 8px}
-            td[data-t]::before{content:attr(data-t) ": ";font-weight:bold;color:#6d6478}
-        }
-    </style>
-
-    <style>
-        .general{display:flex;flex-wrap:wrap;gap:22px;align-items:center;background:#49366b;color:#fff;border-radius:14px;padding:14px 20px;margin-bottom:16px}
-        .general b{display:block;font-size:24px}
-        .general span{font-size:12px;opacity:.85}
-        .general .g-total b{font-size:34px}
-        .general .g-total{padding-right:22px;border-right:1px solid rgba(255,255,255,.25)}
-        .general .g-planes{margin-left:auto;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-        .general em{font-style:normal;background:rgba(255,255,255,.15);padding:4px 10px;border-radius:999px;font-size:13px;font-weight:bold}
-        .filtros{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
-        .filtros input{width:260px;font-family:Arial,sans-serif}
-        .filtros .cuenta{margin-left:auto;font-size:13px;color:#5d5666}
-        .fase{background:#efe9f7;color:#49366b;padding:12px 14px;border-radius:10px;margin-bottom:14px;font-size:14px}
-        button[disabled]{opacity:.45;cursor:not-allowed}
-        .uisp{background:#fff3e0;color:#8a4b00}
-        .rad{background:#e8f0fe;color:#1a4b9c}
-        td small{color:#6d6478}
-    </style>
-</head>
-<body>
-<main>
-    <a href="?modulo=inicio">← Volver al portal</a>
-    <h1>Clientes PPPoE en RADIUS</h1>
-    <p class="sub">Usuarios PPPoE de MKR-FSL02 (<?= escapar(PP_ROUTER) ?>): IP fija, plan, conexión y bloqueos.</p>
 
     <div class="fase"><b>Fase 1 · solo consulta.</b> Esta pantalla no cambia nada. Los botones se activan para cada cliente cuando esté migrado a RADIUS
         (<?= $migradosPp ?> de <?= $totalPp ?> hoy). Para suspender o reactivar mientras tanto, usa UISP.</div>
@@ -239,6 +152,7 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     </div>
 
     <section class="caja">
+        <div class="tabla">
         <table>
             <thead><tr><th>IP fija</th><th>Usuario</th><th>Plan</th><th>Conexión</th><th>Estado</th><th></th></tr></thead>
             <tbody id="filas">
@@ -274,15 +188,20 @@ header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
                         <br><span class="pill <?= $c['radius'] ? 'rad' : 'gris' ?>"><?= $c['radius'] ? 'En RADIUS' : 'En router' ?></span>
                     </td>
                     <td><div class="acciones">
-                        <button class="b-plan" disabled title="Disponible cuando el cliente esté migrado a RADIUS">Cambiar plan</button>
-                        <button class="b-susp" disabled title="Disponible cuando el cliente esté migrado a RADIUS">Suspender</button>
+                        <?php if ($c['radius']): ?>
+                            <button class="b-plan" disabled title="Se activa en la fase 2">Cambiar plan</button>
+                            <button class="b-susp" disabled title="Se activa en la fase 2">Suspender</button>
+                        <?php else: ?>
+                            <span class="tenue" title="Los botones se activan cuando el cliente esté migrado a RADIUS">Solo consulta</span>
+                        <?php endif; ?>
                     </div></td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
+        </div>
     </section>
-</main>
+<?php portalFin(); ?>
 <script>
 (function () {
     var filas = Array.prototype.slice.call(document.querySelectorAll('#filas tr[data-buscar]'));
