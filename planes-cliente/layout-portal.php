@@ -179,7 +179,6 @@ table.historial{font-size:12.5px}
             <div class="nav-group">
                 <span class="nav-group-label">Clientes y servicios</span>
                 <?= portalEnlace('clientes', $moduloActual, '◉', 'Clientes PPPoE') ?>
-                <?= portalEnlace('dhcp', $moduloActual, '⌁', 'Equipos DHCP') ?>
             </div>
             <div class="nav-group">
                 <span class="nav-group-label">Planes y perfiles</span>
