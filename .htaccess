@@ -11,8 +11,12 @@ Options -Indexes
     Require all denied
 </FilesMatch>
 
-# Carpetas internas
+# Carpetas internas (incluye el historial de Git: tiene el código completo)
 RedirectMatch 404 "^/(vendor|respaldos|pruebas-uisp)(/|$)"
+RedirectMatch 404 "/\.(git|svn|hg)(/|$)"
+<FilesMatch "^\.git">
+    Require all denied
+</FilesMatch>
 
 # Bloquear respaldos, llaves y datos sueltos
 <FilesMatch "(\.bak|\.orig$|\.sql|\.tar|\.zip$|\.tsv$|\.key$|\.pem$|\.py$|\.sh$|\.log$)">
