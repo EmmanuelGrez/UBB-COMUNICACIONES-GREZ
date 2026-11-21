@@ -670,7 +670,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
 
     <section class="caja">
         <div class="barra">
-            <input id="buscar" type="search" placeholder="Buscar IP, MAC o nombre" autocomplete="off">
+            <?= portalBuscador('buscar', 'IP, MAC o nombre') ?>
             <select id="f-estado" aria-label="Estado">
                 <option value="">Todos</option>
                 <option value="activo">Activos</option>
@@ -699,6 +699,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                 $susp = $origenSuspRd[$c['mac']] ?? null;
                 $porUisp = $suspendido && ($susp['origen'] ?? '') === 'UISP';
                 $sinRel = ($c['nombre'] ?? '') === '';
+                $nombreRd = $sinRel ? $c['ip'] : $c['nombre'] . ' (' . $c['ip'] . ')';
                 $enLinea = !empty($c['sesion_desde']);
                 $velocidad = (int) strtok((string) $c['lista'], 'M');
                 $estados = [$suspendido ? 'susp' : 'activo', $enLinea ? 'linea' : 'fuera'];
@@ -728,7 +729,9 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                     <td><div class="acciones">
                         <?php if (!$suspendido && count($planesRd) > 1): ?>
                         <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
-                              onsubmit="return confirm('¿Cambiar el plan de <?= escapar($c['ip']) ?>?');">
+                              data-confirmar="¿Cambiar el plan de <?= escapar($nombreRd) ?>?"
+                              data-detalle="La nueva velocidad se aplica al momento; el equipo puede reconectarse unos segundos."
+                              data-verbo="Cambiar plan">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
                             <input type="hidden" name="mac" value="<?= escapar($c['mac']) ?>">
                             <input type="hidden" name="accion" value="cambiar_plan">
@@ -744,7 +747,10 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                             <span class="pill uisp" title="UISP lo tiene bloqueado. Si se reactiva aquí, el sincronizador lo vuelve a suspender en un minuto.">Reactivar en UISP</span>
                         <?php else: ?>
                         <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
-                              onsubmit="return confirm('<?= $suspendido ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($c['ip']) ?> (<?= escapar($c['mac']) ?>)?');">
+                              data-confirmar="<?= $suspendido ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($nombreRd) ?>?"
+                              data-detalle="<?= $suspendido ? 'Vuelve a tener internet con su plan de siempre.' : 'Se le corta el internet de inmediato y verá el aviso de suspensión. Puedes reactivarlo después.' ?> MAC <?= escapar($c['mac']) ?>."
+                              data-verbo="<?= $suspendido ? 'Reactivar' : 'Suspender' ?> <?= escapar($c['ip']) ?>"
+                              data-tono="<?= $suspendido ? 'bien' : 'peligro' ?>">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
                             <input type="hidden" name="mac" value="<?= escapar($c['mac']) ?>">
                             <?php if ($suspendido): ?>
@@ -766,7 +772,9 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
     <details class="caja plegable">
         <summary>Dar de alta un cliente en la VLAN <?= escapar($vlanRd) ?></summary>
         <form class="alta" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
-              onsubmit="return confirm('¿Dar de alta esta MAC con esa IP fija?');">
+              data-confirmar="¿Dar de alta este equipo en la VLAN <?= escapar($vlanRd) ?>?"
+              data-detalle="Queda con IP fija y el plan <?= escapar($cfgRd['lista']) ?>. Conectará en su siguiente renovación."
+              data-verbo="Dar de alta">
             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
             <input type="hidden" name="accion" value="alta">
             <div>
@@ -818,7 +826,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
     var url = '?modulo=radius-dhcp&vlan=<?= rawurlencode($vlanRd) ?>&estado=1';
     var ocupado = function () {
         var a = document.activeElement;
-        return a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+        return document.querySelector('dialog[open]') || (a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
     };
     setInterval(function () {
         if (document.hidden) return;

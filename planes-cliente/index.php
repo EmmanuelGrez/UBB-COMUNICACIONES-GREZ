@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../vendor/autoload.php';
+require_once __DIR__ . '/layout-portal.php';
 
 use RouterOS\Client;
 
@@ -1473,7 +1474,7 @@ usort($planesDisponibles, function ($a, $b) use ($ordenPlanes) {
 
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-<title>Gestión de planes | UBB Comunicaciones</title>
+<title><?= escapar((['inicio'=>'Inicio','catalogo'=>'Catálogo comercial','perfiles'=>'Perfiles MikroTik','historial'=>'Gestión de cambios','solicitudes'=>'Gestión de cambios'])[$moduloActual] ?? 'Inicio') ?> | UBB Comunicaciones</title>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
@@ -1926,86 +1927,73 @@ body[data-modulo="historial"] #moduloHistorial{display:block!important}
 }
 
 </style>
+<style>
+<?= portalCssMarco() ?>
+/* Ajustes de diseño (auditoría UX) */
+body{background:var(--bg);font-size:14px}
+body:not([data-modulo="inicio"]) .pppoe-mini-resumen{display:none!important}
+.titulo-pagina{margin:0 0 4px;color:var(--plum);font-size:clamp(20px,2.2vw,28px);font-weight:600;letter-spacing:-.6px;line-height:1.2}
+.sub{margin:0 0 18px;color:var(--muted);font-size:14px}
+.page-eyebrow{font-size:12px;font-weight:600;letter-spacing:1.2px;margin:0 0 6px 2px}
+.aviso{font-size:14px;background:var(--surface);box-shadow:none}
+.aviso code{font-size:13px}
+.aviso.error{background:var(--red-soft)}
+.aviso-detalle{margin-top:6px;font-size:12px;color:#91434a}
+.aviso-detalle summary{cursor:pointer;font-weight:600}
+.tarjeta-estadistica:before{display:none}
+.tarjeta-estadistica:nth-child(2){background:var(--surface)}
+.tarjeta-estadistica:hover{transform:none;box-shadow:var(--shadow)}
+.estadistica-etiqueta{font-size:13px;font-weight:600}
+.estadistica-descripcion{font-size:12.5px}
+.pppoe-mini-resumen{font-size:13px}
+.pie{font-size:12px}
+.module-tag,.etiqueta{font-size:12px}
+.panel-cabecera p{font-size:13px}
+.boton{font-size:13px;font-weight:600}
+.boton-paginacion,.filtro-rapido{font-size:12.5px}
+.pagina-indicador{font-size:12.5px}
+@media(max-width:640px){.page-eyebrow{font-size:12px}}
+</style>
 
 </head>
 
 <body data-modulo="<?= escapar($moduloActual) ?>">
 <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegación principal">
-        <div class="sidebar-brand">
-            <div class="brand-monogram">UBB</div>
-            <div><strong>UBB COMUNICACIONES</strong><small>Gestión de red</small></div>
-        </div>
-        <div class="sidebar-label">Navegación principal</div>
-        <nav class="sidebar-nav" aria-label="Módulos del sistema">
-            <div class="nav-group">
-                <span class="nav-group-label">General</span>
-                <a class="nav-link<?= $moduloActual === 'inicio' ? ' active' : '' ?>" href="?modulo=inicio"><span class="nav-icon">⌂</span>Inicio</a>
-            </div>
-            <div class="nav-group">
-                <span class="nav-group-label">Clientes y servicios</span>
-            </div>
-            <div class="nav-group">
-                <span class="nav-group-label">Planes y perfiles</span>
-                <a class="nav-link<?= $moduloActual === 'catalogo' ? ' active' : '' ?>" href="?modulo=catalogo"><span class="nav-icon">◇</span>Catálogo comercial</a>
-                <a class="nav-link<?= $moduloActual === 'perfiles' ? ' active' : '' ?>" href="?modulo=perfiles"><span class="nav-icon">≋</span>Perfiles MikroTik</a>
-            </div>
-            <div class="nav-group">
-                <span class="nav-group-label">Monitoreo y control</span>
-                <a class="nav-link<?= $moduloActual === 'radius-dhcp' ? ' active' : '' ?>" href="?modulo=radius-dhcp"><span class="nav-icon">⇄</span>Clientes DHCP RADIUS</a>
-                <a class="nav-link<?= $moduloActual === 'radius-pppoe' ? ' active' : '' ?>" href="?modulo=radius-pppoe"><span class="nav-icon">⇆</span>Clientes PPPoE RADIUS</a>
-                <a class="nav-link<?= $moduloActual === 'historial' || $moduloActual === 'solicitudes' ? ' active' : '' ?>" href="?modulo=historial"><span class="nav-icon">◷</span>Gestión de cambios</a>
-            </div>
-        </nav>
-        <div class="sidebar-spacer"></div>
-        <div class="sidebar-status">
-            <div class="sidebar-status-title">Estado de conexiones</div>
-            <div class="status-line"><span class="status-dot<?= $errorConexion ? ' error' : '' ?>"></span><div>MikroTik<small><?= $errorConexion ? 'Consulta no disponible' : 'Consulta disponible' ?></small></div></div>
-            <div class="status-line"><span class="status-dot<?= $errorConsultaRadius ? ' error' : '' ?>"></span><div>RADIUS<small><?= $errorConsultaRadius ? 'Consulta no disponible' : 'Consulta disponible' ?></small></div></div>
-        </div>
-    </aside>
+    <?= portalMenu($moduloActual, ['MikroTik' => !$errorConexion, 'RADIUS' => !$errorConsultaRadius]) ?>
 
     <div class="main-area">
         <main class="contenedor">
             <p class="page-eyebrow">Administración WISP · UBB Comunicaciones</p>
-    <header class="encabezado">
-
-        <div class="marca">
-
-            <img class="logo" src="data:image/png;base64,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" alt="Logotipo de UBB Comunicaciones" width="65" height="65">
-
-            <div>
-
-                <h1>Administración de planes y servicios</h1>
-
-                <p>Gestión de paquetes, velocidades y perfiles por servicio</p>
-
-            </div>
-
-        </div>
-
-        <div class="estado-conexion">
-
-            <span class="punto <?= $errorConexion ? 'error' : '' ?>"></span>
-
-            <?= $errorConexion ? 'Error de conexión MikroTik' : 'MikroTik · ' . escapar($mikrotikConfig['host']) ?>
-
-        </div>
-
-    </header>
+<?php
+    $paginas = [
+        'inicio' => ['Inicio', 'Resumen de cuentas PPPoE y su relación con la base de clientes.'],
+        'catalogo' => ['Catálogo comercial', 'Planes vigentes y sus velocidades.'],
+        'perfiles' => ['Perfiles MikroTik', 'Cuántas cuentas usa cada perfil del router.'],
+        'historial' => ['Gestión de cambios', 'Solicitudes de cambio de plan, quién las pidió y cómo terminaron.'],
+        'solicitudes' => ['Gestión de cambios', 'Solicitudes de cambio de plan, quién las pidió y cómo terminaron.'],
+    ];
+    [$tituloPagina, $subPagina] = $paginas[$moduloActual] ?? $paginas['inicio'];
+    $fallas = array_values(array_filter([
+        $errorConexion ? 'el router MikroTik' : '',
+        $errorConsultaRadius ? 'RADIUS' : '',
+        $errorBaseDatos ? 'la base de clientes' : '',
+    ]));
+    ?>
+    <h1 class="titulo-pagina"><?= escapar($tituloPagina) ?></h1>
+    <p class="sub"><?= escapar($subPagina) ?></p>
     <div class="aviso" id="inicio">
         <strong>Integración por servicio:</strong>
         esta pantalla utiliza <code>id_servicio</code> para relacionar la información de clientes y catálogo.
         Funciona en modo consulta: no escribe en inventario, no modifica la base de Jamileth ni aplica cambios en MikroTik o RADIUS.
     </div>
-    <?php if ($errorConexion): ?>
-        <div class="aviso error"><?= escapar($errorConexion) ?></div>
-    <?php endif; ?>
-    <?php if ($errorConsultaRadius): ?>
-        <div class="aviso error"><?= escapar($errorConsultaRadius) ?></div>
-    <?php endif; ?>
-    <?php if ($errorBaseDatos): ?>
-        <div class="aviso error"><strong>Consulta de clientes pendiente:</strong> <?= escapar($errorBaseDatos) ?></div>
+    <?php if ($fallas !== []): ?>
+        <div class="aviso error" role="status">
+            <strong>Sin conexión con <?= escapar(count($fallas) > 1 ? implode(', ', array_slice($fallas, 0, -1)) . ' y ' . end($fallas) : $fallas[0]) ?>.</strong>
+            Lo que ves puede no estar al día. Recarga en unos minutos; si sigue igual, revisa que el servidor llegue a esos equipos.
+            <details class="aviso-detalle"><summary>Detalle técnico</summary>
+                <?= escapar(implode(' · ', array_filter([$errorConexion, $errorConsultaRadius, $errorBaseDatos]))) ?>
+            </details>
+        </div>
     <?php endif; ?>
 
     <section class="estadisticas">
@@ -2293,7 +2281,7 @@ body[data-modulo="historial"] #moduloHistorial{display:block!important}
 <section class="module-placeholder historial-panel" id="moduloHistorial">
     <div class="historial-cabecera">
         <div>
-            <span class="module-tag">Consulta en vivo · Solo lectura</span>
+            <span class="module-tag">Consulta en vivo</span>
             <h2>Historial de cambios</h2>
             <p>Solicitudes, responsables, validaciones, autorizaciones y resultados.</p>
         </div>

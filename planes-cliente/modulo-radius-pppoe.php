@@ -130,21 +130,21 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
         <div><b><?= $migradosPp ?></b><span>migrados a RADIUS</span></div>
-        <div class="g-planes"><span>Por plan</span>
+        <?php if ($porPlanPp !== []): ?><div class="g-planes"><span>Por plan</span>
             <?php foreach ($porPlanPp as $p => $n): ?><em><?= escapar($p) ?> · <?= $n ?></em><?php endforeach; ?>
-        </div>
+        </div><?php endif; ?>
     </section>
 
     <div class="filtros">
-        <input id="buscar" type="search" placeholder="Buscar usuario, IP o MAC" autocomplete="off">
-        <select id="f-estado">
+        <?= portalBuscador('buscar', 'Usuario, IP o MAC') ?>
+        <select id="f-estado" aria-label="Estado">
             <option value="">Todos</option>
             <option value="linea">En línea</option>
             <option value="fuera">Desconectados</option>
             <option value="uisp">Bloqueados en UISP</option>
             <option value="radius">Migrados a RADIUS</option>
         </select>
-        <select id="f-plan">
+        <select id="f-plan" aria-label="Plan">
             <option value="">Todos los planes</option>
             <?php foreach ($porPlanPp as $p => $n): ?><option value="<?= escapar($p) ?>"><?= escapar($p) ?></option><?php endforeach; ?>
         </select>
