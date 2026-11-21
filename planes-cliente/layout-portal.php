@@ -15,6 +15,89 @@ function portalEnlace(string $modulo, string $actual, string $icono, string $tex
         . '<span class="nav-icon">' . $icono . '</span>' . htmlspecialchars($texto, ENT_QUOTES) . '</a>';
 }
 
+/** CSS del marco (barra lateral, menú, título). Lo usan index.php y los módulos RADIUS para verse igual. */
+function portalCssMarco(): string
+{
+    return <<<'CSS'
+/* Marco: barra lateral + contenido */
+.app-shell{min-height:100vh;display:grid;grid-template-columns:258px minmax(0,1fr)}
+.sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:26px 17px 19px;background:var(--plum);color:#f8f6ff;overflow-y:auto;z-index:20}
+.sidebar-brand{display:flex;align-items:center;gap:12px;padding:3px 9px 25px;border-bottom:1px solid rgba(255,255,255,.12)}
+.brand-monogram{width:45px;height:45px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(255,255,255,.10);font-weight:600;font-size:14px;letter-spacing:.7px}
+.sidebar-brand strong{display:block;font-size:13px;letter-spacing:.6px}
+.sidebar-brand small{display:block;margin-top:3px;color:#c9bfdc;font-size:12px;letter-spacing:1.3px;text-transform:uppercase}
+.sidebar-nav{display:grid;gap:15px;margin-top:22px}
+.nav-group{display:grid;gap:5px;min-width:0}
+.nav-group-label{padding:0 12px 3px;color:#a99cbd;font-size:12px;letter-spacing:.6px;font-weight:600;letter-spacing:1.1px;text-transform:uppercase}
+.nav-link{display:flex;align-items:center;gap:12px;padding:11px 13px;border:1px solid transparent;border-radius:12px;color:#ded7eb;font-size:13.5px;font-weight:600;text-decoration:none;transition:background .2s,transform .2s}
+.nav-link:hover{background:rgba(255,255,255,.09);transform:translateX(2px)}
+.nav-link.active{background:rgba(154,126,235,.26);border-color:rgba(205,190,255,.22);color:#fff;box-shadow:inset 3px 0 #c8b8ff}
+.nav-icon{width:20px;text-align:center;color:#c7b9ed;font-size:17px}
+.main-area{min-width:0}
+.contenedor{width:min(1500px,100%);margin:0 auto;padding:28px 32px 28px}
+.page-eyebrow{margin:0 0 6px 2px;color:#827b94;font-size:12px;font-weight:600;letter-spacing:1.6px;text-transform:uppercase}
+.titulo-pagina{margin:0 0 4px;color:var(--plum);font-size:clamp(20px,2.2vw,28px);letter-spacing:-.6px;line-height:1.2}
+.sub{margin:0 0 18px;color:var(--muted);font-size:13px}
+/* Foco visible con teclado */
+a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--plum-3);outline-offset:2px}
+.sidebar a:focus-visible{outline-color:#c8b8ff}
+/* Estado de conexiones (abajo del menú) */
+.sidebar-spacer{flex:1;min-height:25px}
+.sidebar-status{padding:14px 15px;border:1px solid rgba(255,255,255,.13);border-radius:14px;background:rgba(255,255,255,.06)}
+.sidebar-status-title{margin-bottom:8px;color:#c6bbd8;font-size:12px;font-weight:600;letter-spacing:.6px;text-transform:uppercase}
+.status-line{display:flex;align-items:center;gap:10px;padding:6px 0;color:#f6f3fb;font-size:13px}
+.status-line small{display:block;color:#bfb5cf;font-size:12px}
+.status-dot{width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#60d69b}
+.status-dot.error{background:#ff8c96}
+.sidebar-label{display:none}
+.sidebar:before{display:none}
+@media(max-width:1180px){.app-shell{grid-template-columns:220px minmax(0,1fr)}.contenedor{padding:22px}}
+@media(max-width:900px){
+    .app-shell{display:block}
+    .sidebar{position:sticky;top:0;height:auto;padding:10px 14px;flex-direction:row;align-items:center;gap:12px;overflow:visible}
+    .sidebar-brand{padding:0;border:0}.sidebar-brand small,.sidebar-brand strong{display:none}
+    .brand-monogram{width:38px;height:38px;font-size:12px;flex:0 0 38px}
+    .sidebar-nav{display:flex;gap:6px;margin:0;overflow-x:auto;scrollbar-width:none;min-width:0}
+    .sidebar-nav::-webkit-scrollbar{display:none}
+    .nav-group{display:flex;gap:6px;flex:0 0 auto}.nav-group-label{display:none}
+    .nav-link{padding:10px 12px;font-size:13px;white-space:nowrap}.nav-link:hover{transform:none}
+    .contenedor{padding:16px}
+    .sidebar-nav{-webkit-mask-image:linear-gradient(90deg,#000 82%,transparent);mask-image:linear-gradient(90deg,#000 82%,transparent);padding-right:28px}
+    .sidebar-spacer,.sidebar-status{display:none}
+    .nav-group{flex-direction:row}
+    .nav-icon{font-size:15px}
+}
+CSS;
+}
+
+/** Barra lateral con el menú. $estado opcional: ['MikroTik' => true/false, 'RADIUS' => true/false]. */
+function portalMenu(string $moduloActual, array $estado = []): string
+{
+    $h = '<aside class="sidebar" aria-label="Navegación principal">'
+        . '<div class="sidebar-brand"><div class="brand-monogram">UBB</div>'
+        . '<div><strong>UBB COMUNICACIONES</strong><small>Gestión de red</small></div></div>'
+        . '<nav class="sidebar-nav" aria-label="Módulos del sistema">'
+        . '<div class="nav-group"><span class="nav-group-label">General</span>'
+        . portalEnlace('inicio', $moduloActual, '⌂', 'Inicio') . '</div>'
+        . '<div class="nav-group"><span class="nav-group-label">Planes y perfiles</span>'
+        . portalEnlace('catalogo', $moduloActual, '◇', 'Catálogo comercial')
+        . portalEnlace('perfiles', $moduloActual, '≋', 'Perfiles MikroTik') . '</div>'
+        . '<div class="nav-group"><span class="nav-group-label">Monitoreo y control</span>'
+        . portalEnlace('radius-dhcp', $moduloActual, '⇄', 'Clientes DHCP RADIUS')
+        . portalEnlace('radius-pppoe', $moduloActual, '⇆', 'Clientes PPPoE RADIUS')
+        . portalEnlace('historial', $moduloActual === 'solicitudes' ? 'historial' : $moduloActual, '◷', 'Gestión de cambios') . '</div>'
+        . '</nav>';
+    if ($estado !== []) {
+        $h .= '<div class="sidebar-spacer"></div><div class="sidebar-status"><div class="sidebar-status-title">Estado de conexiones</div>';
+        foreach ($estado as $nombre => $ok) {
+            $h .= '<div class="status-line"><span class="status-dot' . ($ok ? '' : ' error') . '"></span><div>'
+                . htmlspecialchars($nombre, ENT_QUOTES) . '<small>' . ($ok ? 'Conectado' : 'Sin conexión') . '</small></div></div>';
+        }
+        $h .= '</div>';
+    }
+    return $h . '</aside>';
+}
+
 function portalInicio(string $titulo, string $subtitulo, string $moduloActual): void
 {
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -40,25 +123,7 @@ body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,"Segoe UI"
 button,input,select{font:inherit}
 button{cursor:pointer}
 a{color:var(--plum-3)}
-/* Marco: barra lateral + contenido */
-.app-shell{min-height:100vh;display:grid;grid-template-columns:258px minmax(0,1fr)}
-.sidebar{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:26px 17px 19px;background:var(--plum);color:#f8f6ff;overflow-y:auto;z-index:20}
-.sidebar-brand{display:flex;align-items:center;gap:12px;padding:3px 9px 25px;border-bottom:1px solid rgba(255,255,255,.12)}
-.brand-monogram{width:45px;height:45px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.22);border-radius:14px;background:rgba(255,255,255,.10);font-weight:600;font-size:14px;letter-spacing:.7px}
-.sidebar-brand strong{display:block;font-size:13px;letter-spacing:.6px}
-.sidebar-brand small{display:block;margin-top:3px;color:#c9bfdc;font-size:12px;letter-spacing:1.3px;text-transform:uppercase}
-.sidebar-nav{display:grid;gap:15px;margin-top:22px}
-.nav-group{display:grid;gap:5px;min-width:0}
-.nav-group-label{padding:0 12px 3px;color:#a99cbd;font-size:12px;letter-spacing:.6px;font-weight:600;letter-spacing:1.1px;text-transform:uppercase}
-.nav-link{display:flex;align-items:center;gap:12px;padding:11px 13px;border:1px solid transparent;border-radius:12px;color:#ded7eb;font-size:13.5px;font-weight:600;text-decoration:none;transition:background .2s,transform .2s}
-.nav-link:hover{background:rgba(255,255,255,.09);transform:translateX(2px)}
-.nav-link.active{background:rgba(154,126,235,.26);border-color:rgba(205,190,255,.22);color:#fff;box-shadow:inset 3px 0 #c8b8ff}
-.nav-icon{width:20px;text-align:center;color:#c7b9ed;font-size:17px}
-.main-area{min-width:0}
-.contenedor{width:min(1500px,100%);margin:0 auto;padding:28px 32px 28px}
-.page-eyebrow{margin:0 0 6px 2px;color:#827b94;font-size:12px;font-weight:600;letter-spacing:1.6px;text-transform:uppercase}
-.titulo-pagina{margin:0 0 4px;color:var(--plum);font-size:clamp(20px,2.2vw,28px);letter-spacing:-.6px;line-height:1.2}
-.sub{margin:0 0 18px;color:var(--muted);font-size:13px}
+<?= portalCssMarco() ?>
 /* Bloques */
 .caja{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}
 .general{display:flex;flex-wrap:wrap;gap:24px;align-items:center;background:var(--plum);color:#fff;border-radius:var(--radius);padding:18px 24px;margin-bottom:16px}
@@ -132,9 +197,6 @@ details.plegable summary{cursor:pointer;font-weight:600;color:var(--plum-2);font
 details.plegable[open] summary{margin-bottom:14px}
 table.historial{font-size:12.5px}
 .nota{font-size:12px;color:var(--muted);margin:4px 2px 24px}
-/* Foco visible con teclado */
-a:focus-visible,button:focus-visible,summary:focus-visible{outline:2px solid var(--plum-3);outline-offset:2px}
-.sidebar a:focus-visible{outline-color:#c8b8ff}
 /* Buscador con etiqueta visible */
 .buscador{display:flex;align-items:center;gap:8px;margin:0}
 .buscador span{font-size:13px;font-weight:600;color:var(--plum-2);margin:0}
@@ -147,20 +209,8 @@ dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
 .dlg-acciones{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 @media(max-width:760px){.buscador{width:100%;flex-wrap:wrap}.buscador span{width:100%}}
 /* Celular y tabletas */
-@media(max-width:1180px){.app-shell{grid-template-columns:220px minmax(0,1fr)}.contenedor{padding:22px}}
 @media(max-width:1000px){.resumen{grid-template-columns:repeat(2,minmax(0,1fr))}.general .g-planes{margin-left:0;width:100%}}
-@media(max-width:900px){
-    .app-shell{display:block}
-    .sidebar{position:sticky;top:0;height:auto;padding:10px 14px;flex-direction:row;align-items:center;gap:12px;overflow:visible}
-    .sidebar-brand{padding:0;border:0}.sidebar-brand small,.sidebar-brand strong{display:none}
-    .brand-monogram{width:38px;height:38px;font-size:12px;flex:0 0 38px}
-    .sidebar-nav{display:flex;gap:6px;margin:0;overflow-x:auto;scrollbar-width:none;min-width:0}
-    .sidebar-nav::-webkit-scrollbar{display:none}
-    .nav-group{display:flex;gap:6px;flex:0 0 auto}.nav-group-label{display:none}
-    .nav-link{padding:10px 12px;font-size:13px;white-space:nowrap}.nav-link:hover{transform:none}
-    .contenedor{padding:16px}
-    .tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}
-}
+@media(max-width:900px){.tabs{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;scrollbar-width:thin}}
 @media(max-width:760px){
     .general{gap:14px;padding:16px}.general .g-total{border:0;padding:0;width:100%}
     .barra input,.filtros input{width:100%}.barra .cuenta,.filtros .cuenta{margin-left:0}
@@ -174,7 +224,6 @@ dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
     td[data-t]::before{content:attr(data-t);display:block;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;color:var(--muted)}
     .acciones{justify-content:flex-start;flex-wrap:wrap;padding-top:4px}
     td.mono{overflow-wrap:normal;white-space:nowrap;font-size:12.5px}
-    .sidebar-nav{-webkit-mask-image:linear-gradient(90deg,#000 82%,transparent);mask-image:linear-gradient(90deg,#000 82%,transparent);padding-right:28px}
 }
 @media(max-width:420px){.resumen{grid-template-columns:1fr 1fr;gap:8px}.tarjeta{padding:12px}.tarjeta b{font-size:20px}.general b{font-size:20px}.general .g-total b{font-size:28px}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -182,29 +231,7 @@ dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
 </head>
 <body data-modulo="<?= htmlspecialchars($moduloActual, ENT_QUOTES) ?>">
 <div class="app-shell">
-    <aside class="sidebar" aria-label="Navegación principal">
-        <div class="sidebar-brand">
-            <div class="brand-monogram">UBB</div>
-            <div><strong>UBB COMUNICACIONES</strong><small>Gestión de red</small></div>
-        </div>
-        <nav class="sidebar-nav" aria-label="Módulos del sistema">
-            <div class="nav-group">
-                <span class="nav-group-label">General</span>
-                <?= portalEnlace('inicio', $moduloActual, '⌂', 'Inicio') ?>
-            </div>
-            <div class="nav-group">
-                <span class="nav-group-label">Planes y perfiles</span>
-                <?= portalEnlace('catalogo', $moduloActual, '◇', 'Catálogo comercial') ?>
-                <?= portalEnlace('perfiles', $moduloActual, '≋', 'Perfiles MikroTik') ?>
-            </div>
-            <div class="nav-group">
-                <span class="nav-group-label">Monitoreo y control</span>
-                <?= portalEnlace('radius-dhcp', $moduloActual, '⇄', 'Clientes DHCP RADIUS') ?>
-                <?= portalEnlace('radius-pppoe', $moduloActual, '⇆', 'Clientes PPPoE RADIUS') ?>
-                <?= portalEnlace('historial', $moduloActual, '◷', 'Gestión de cambios') ?>
-            </div>
-        </nav>
-    </aside>
+    <?= portalMenu($moduloActual) ?>
     <div class="main-area">
         <main class="contenedor">
             <p class="page-eyebrow">Administración WISP · UBB Comunicaciones</p>

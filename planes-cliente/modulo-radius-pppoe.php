@@ -130,9 +130,9 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
         <div><b><?= $migradosPp ?></b><span>migrados a RADIUS</span></div>
-        <div class="g-planes"><span>Por plan</span>
+        <?php if ($porPlanPp !== []): ?><div class="g-planes"><span>Por plan</span>
             <?php foreach ($porPlanPp as $p => $n): ?><em><?= escapar($p) ?> · <?= $n ?></em><?php endforeach; ?>
-        </div>
+        </div><?php endif; ?>
     </section>
 
     <div class="filtros">
