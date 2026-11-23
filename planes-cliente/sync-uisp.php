@@ -7,6 +7,8 @@
  *   - si su IP esta en BLOCKED_USERS y no esta suspendido  -> lo suspende (origen UISP)
  *   - si su IP ya NO esta en BLOCKED_USERS y fue suspendido por UISP -> lo reactiva
  * Las suspensiones hechas a mano desde el panel (origen PANEL) no se tocan.
+ * Si el panel también avisó a UISP, la suspensión queda con origen UISP y el cliente
+ * tiene unos minutos de gracia (tabla ubb_uisp_gracia) en los que este script no lo toca.
  *
  * Uso (dentro del contenedor):  php sync-uisp.php            aplica los cambios
  *                               php sync-uisp.php --simular  solo muestra lo que haria
@@ -117,11 +119,24 @@ try {
     foreach ($pdo->query("SELECT username, origen FROM ubb_suspensiones") as $s) {
         $suspensiones[$s['username']] = (string) $s['origen'];
     }
+    // Clientes que el panel acaba de suspender/reactivar también en UISP: se respetan unos minutos
+    // mientras UISP actualiza BLOCKED_USERS en el router (ver uisp-puente.php).
+    $gracia = [];
+    try {
+        foreach ($pdo->query("SELECT username FROM ubb_uisp_gracia WHERE hasta > NOW()") as $g) {
+            $gracia[$g['username']] = true;
+        }
+    } catch (Throwable $e) {
+        // la tabla aún no existe: sin periodo de gracia
+    }
 
     // 3. Decidir cambios
     $suspender = [];
     $reactivar = [];
     foreach ($clientes as $c) {
+        if (isset($gracia[$c['mac']])) {
+            continue;
+        }
         $bloqueado = isset($bloqueadas[$c['ip']]);
         $suspendido = $c['lista'] === LISTA_DEUDORES;
         if ($bloqueado && !$suspendido) {

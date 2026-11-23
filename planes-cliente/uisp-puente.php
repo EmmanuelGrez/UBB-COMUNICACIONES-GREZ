@@ -95,6 +95,102 @@ function uispPorRouter(Client $router, string $metodo, string $ruta, ?array $cue
     return ['ok' => $ok, 'datos' => $datos, 'error' => $error];
 }
 
+/* ---------- Sincronizar acciones del panel con UISP ---------- */
+
+const UISP_PUENTE_ACTIVO = '/etc/ubb-panel/uisp-sync-activo';   // si existe este archivo, el panel avisa a UISP
+const UISP_MOTIVO_SUSPENSION = 1;                                 // "Pagos vencidos"
+const UISP_MINUTOS_GRACIA = 10;                                   // sync-uisp no toca a ese cliente mientras UISP actualiza el router
+
+/** ¿Está encendido el aviso panel -> UISP? (se enciende creando el archivo UISP_PUENTE_ACTIVO). */
+function uispSyncActivo(): bool
+{
+    return is_file(UISP_PUENTE_ACTIVO);
+}
+
+/** Crea las tablas que usa el enlace con UISP (si el usuario de la base tiene permiso). */
+function uispCrearTablas(PDO $pdo): void
+{
+    $pdo->exec("CREATE TABLE IF NOT EXISTS ubb_uisp_mapa (
+        servicio_id INT NOT NULL,
+        cliente_id INT NULL,
+        estado TINYINT NULL,
+        sitio_id VARCHAR(64) NOT NULL,
+        ip VARCHAR(45) NOT NULL DEFAULT '',
+        mac VARCHAR(17) NOT NULL DEFAULT '',
+        rol VARCHAR(32) NOT NULL DEFAULT '',
+        actualizado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY k_mac (mac), KEY k_ip (ip), KEY k_servicio (servicio_id)
+    ) DEFAULT CHARSET=utf8mb4");
+    $pdo->exec("CREATE TABLE IF NOT EXISTS ubb_uisp_gracia (
+        username VARCHAR(64) NOT NULL PRIMARY KEY,
+        hasta DATETIME NOT NULL
+    ) DEFAULT CHARSET=utf8mb4");
+}
+
+/**
+ * Número de servicio de UISP de un cliente del panel (primero por MAC, luego por IP).
+ * Devuelve null si no está en el mapa. Lanza error si coincide con más de un servicio.
+ */
+function uispServicioDe(PDO $pdo, string $mac, string $ip): ?int
+{
+    foreach ([['mac', strtoupper($mac)], ['ip', $ip]] as [$campo, $valor]) {
+        if ($valor === '') {
+            continue;
+        }
+        $st = $pdo->prepare("SELECT DISTINCT servicio_id FROM ubb_uisp_mapa WHERE $campo = ? AND estado IN (1, 3)");
+        $st->execute([$valor]);
+        $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+        if (count($ids) === 1) {
+            return $ids[0];
+        }
+        if (count($ids) > 1) {
+            throw new RuntimeException("La $campo $valor aparece en varios servicios de UISP (#" . implode(', #', $ids) . '). Revísalo en UISP.');
+        }
+    }
+    return null;
+}
+
+function uispSuspenderServicio(Client $router, int $servicioId): array
+{
+    return uispPorRouter($router, 'PATCH', "/clients/services/$servicioId/suspend", ['suspensionReasonId' => UISP_MOTIVO_SUSPENSION]);
+}
+
+function uispReactivarServicio(Client $router, int $servicioId): array
+{
+    return uispPorRouter($router, 'PATCH', "/clients/services/$servicioId/cancel-suspend");
+}
+
+/** Durante unos minutos sync-uisp no suspende ni reactiva a este cliente, mientras UISP actualiza el router. */
+function uispMarcarGracia(PDO $pdo, string $mac): void
+{
+    $pdo->prepare("REPLACE INTO ubb_uisp_gracia (username, hasta) VALUES (?, NOW() + INTERVAL " . (int) UISP_MINUTOS_GRACIA . " MINUTE)")
+        ->execute([$mac]);
+}
+
+/** Conexión al router para scripts de terminal: variable de entorno, archivo o (si hay terminal) se pregunta. */
+function uispConectarRouter(): Client
+{
+    $usuario = getenv('MIKROTIK_USER') ?: 'api-ubb';
+    $pass = trim((string) (getenv('MIKROTIK_PASS') ?: @file_get_contents('/etc/ubb-panel/mikrotik-api.pass')));
+    if ($pass === '' && PHP_SAPI === 'cli' && function_exists('stream_isatty') && stream_isatty(STDIN)) {
+        echo "Contraseña de la API del router para '$usuario' (no se ve al escribir): ";
+        system('stty -echo');
+        $pass = trim((string) fgets(STDIN));
+        system('stty echo');
+        echo "\n";
+    }
+    if ($pass === '') {
+        throw new RuntimeException('Falta la contraseña de la API del router (MIKROTIK_PASS o /etc/ubb-panel/mikrotik-api.pass).');
+    }
+    return new Client([
+        'host' => getenv('MIKROTIK_HOST') ?: '10.0.1.6',
+        'user' => $usuario,
+        'pass' => $pass,
+        'port' => (int) (getenv('MIKROTIK_PORT') ?: 8728),
+        'timeout' => 15,
+    ]);
+}
+
 /* ---------- Prueba desde la terminal ---------- */
 
 $ejecutadoDirecto = isset($_SERVER['SCRIPT_FILENAME'])

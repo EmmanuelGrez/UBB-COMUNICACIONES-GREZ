@@ -17,6 +17,8 @@
 use RouterOS\Client;
 use RouterOS\Query;
 
+require_once __DIR__ . '/uisp-puente.php';
+
 const RD_LISTA_DEUDORES = 'CLIENTES-DEUDORES';
 const RD_COMENTARIO_TEMPORAL = 'TEMP-PLAN';
 
@@ -315,6 +317,66 @@ function rdCortarConexiones(Client $router, string $ip): void
     }
 }
 
+/* ---------- Avisar a UISP (si está encendido: /etc/ubb-panel/uisp-sync-activo) ---------- */
+
+/** Tras suspender en el panel: suspende también el servicio en UISP. Devuelve texto para el mensaje. */
+function rdUispTrasSuspender(PDO $pdo, Client $router, string $mac, string $ip): string
+{
+    if (!uispSyncActivo()) {
+        return '';
+    }
+    try {
+        $id = uispServicioDe($pdo, $mac, $ip);
+        if ($id === null) {
+            return ' No encontré su servicio en UISP: suspéndelo también allá.';
+        }
+        $r = uispSuspenderServicio($router, $id);
+        if (!$r['ok']) {
+            return " UISP no lo suspendió (servicio #$id: {$r['error']}). Hazlo allá a mano.";
+        }
+        uispMarcarGracia($pdo, $mac);
+        // Queda como suspensión de UISP: cuando UISP lo reactive (p. ej. al pagar), sync-uisp lo reactiva aquí.
+        $pdo->prepare("UPDATE ubb_suspensiones SET origen = 'UISP' WHERE username = ?")->execute([$mac]);
+        rdBitacora($pdo, $mac, $ip, 'suspender-uisp', "servicio UISP #$id");
+        return " También quedó suspendido en UISP (servicio #$id).";
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS DHCP: aviso a UISP al suspender ' . $mac . ': ' . $e->getMessage());
+        return ' No se pudo avisar a UISP: ' . $e->getMessage();
+    }
+}
+
+/**
+ * Antes de reactivar en el panel: quita la suspensión en UISP.
+ * Si la suspensión es de UISP y no se pudo quitar allá, lanza error (sync-uisp lo volvería a suspender).
+ */
+function rdUispAntesDeReactivar(PDO $pdo, Client $router, string $mac, string $ip, string $origen): string
+{
+    $deUisp = $origen === 'UISP';
+    if (!uispSyncActivo()) {
+        if ($deUisp) {
+            throw new RuntimeException("$mac ($ip) lo suspendió UISP: reactívalo en UISP y aquí se reactiva solo.");
+        }
+        return '';
+    }
+    $id = uispServicioDe($pdo, $mac, $ip);
+    if ($id === null) {
+        if ($deUisp) {
+            throw new RuntimeException("No encontré el servicio de $mac ($ip) en UISP. Reactívalo en UISP. No se cambió nada.");
+        }
+        return '';
+    }
+    $r = uispReactivarServicio($router, $id);
+    if (!$r['ok']) {
+        if ($deUisp) {
+            throw new RuntimeException("UISP no lo reactivó (servicio #$id: {$r['error']}). No se cambió nada.");
+        }
+        return " (En UISP el servicio #$id no tenía suspensión que quitar.)";
+    }
+    uispMarcarGracia($pdo, $mac);
+    rdBitacora($pdo, $mac, $ip, 'reactivar-uisp', "servicio UISP #$id");
+    return " También quedó activo en UISP (servicio #$id).";
+}
+
 /* ---------- Conexión a la base radius ---------- */
 
 $pdoRd = null;
@@ -422,6 +484,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
                 rdQuitarTemporales($router, $ip);
                 $_SESSION['flash_radius_dhcp_ok'] = "Suspendido: $mac ($ip). Ya ve la página de aviso.";
                 rdBitacora($pdoRd, $mac, $ip, 'suspender', 'estaba ' . $cliente['lista']);
+                $_SESSION['flash_radius_dhcp_ok'] .= rdUispTrasSuspender($pdoRd, $router, $mac, $ip);
             } else {
                 $st = $pdoRd->prepare("SELECT lista_original FROM ubb_suspensiones WHERE username = ?");
                 $st->execute([$mac]);
@@ -432,6 +495,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
                     }
                     $original = $cfgRd['lista']; // suspendido sin registro: se usa el plan de la VLAN
                 }
+                // 0. Si corresponde, quitar primero la suspensión en UISP (si falla y es de UISP, no se cambia nada)
+                $st = $pdoRd->prepare("SELECT origen FROM ubb_suspensiones WHERE username = ?");
+                $st->execute([$mac]);
+                $notaUisp = rdUispAntesDeReactivar($pdoRd, $router, $mac, $ip, strtoupper((string) ($st->fetchColumn() ?: 'PANEL')));
                 // 1. Regresar su plan en RADIUS
                 $pdoRd->prepare("UPDATE radreply SET value = ? WHERE username = ? AND attribute = 'Mikrotik-Address-List'")
                     ->execute([$original, $mac]);
@@ -449,7 +516,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
                 $nota = rdPuenteTemporal($router, $mac, $ip, $original, $renuevaEn);
                 $pdoRd->prepare("DELETE FROM ubb_suspensiones WHERE username = ?")->execute([$mac]);
                 rdBitacora($pdoRd, $mac, $ip, 'reactivar', 'vuelve a ' . $original);
-                $_SESSION['flash_radius_dhcp_ok'] = "Reactivado: $mac ($ip) con $original. $nota";
+                $_SESSION['flash_radius_dhcp_ok'] = "Reactivado: $mac ($ip) con $original. $nota" . $notaUisp;
             }
         } elseif ($accion === 'cambiar_plan') {
             $plan = (string) ($_POST['plan'] ?? '');
@@ -606,6 +673,24 @@ if ($pdoRd instanceof PDO && $tablaSuspensionesRd) {
     }
 }
 
+/* Servicio de UISP de cada cliente (tabla que arma uisp-mapa.php) */
+$uispActivoRd = uispSyncActivo();
+$servicioUispRd = [];
+if ($pdoRd instanceof PDO) {
+    try {
+        foreach ($pdoRd->query("SELECT mac, ip, servicio_id FROM ubb_uisp_mapa WHERE estado IN (1, 3)") as $m) {
+            if ($m['mac'] !== '') {
+                $servicioUispRd['mac:' . $m['mac']][] = (int) $m['servicio_id'];
+            }
+            if ($m['ip'] !== '') {
+                $servicioUispRd['ip:' . $m['ip']][] = (int) $m['servicio_id'];
+            }
+        }
+    } catch (Throwable $e) {
+        // Todavía no existe el mapa: se muestra sin número de servicio.
+    }
+}
+
 /* Historial de esta VLAN (últimos cambios hechos desde el panel) */
 $historialRd = [];
 if ($pdoRd instanceof PDO) {
@@ -700,6 +785,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                 $porUisp = $suspendido && ($susp['origen'] ?? '') === 'UISP';
                 $sinRel = ($c['nombre'] ?? '') === '';
                 $nombreRd = $sinRel ? $c['ip'] : $c['nombre'] . ' (' . $c['ip'] . ')';
+                $idsUisp = array_values(array_unique($servicioUispRd['mac:' . strtoupper($c['mac'])] ?? $servicioUispRd['ip:' . $c['ip']] ?? []));
                 $enLinea = !empty($c['sesion_desde']);
                 $velocidad = (int) strtok((string) $c['lista'], 'M');
                 $estados = [$suspendido ? 'susp' : 'activo', $enLinea ? 'linea' : 'fuera'];
@@ -710,7 +796,9 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                     data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['lista']) ?>">
                     <td data-t="IP" class="mono"><b><?= escapar($c['ip']) ?></b></td>
                     <td data-t="MAC" class="mono"><?= escapar($c['mac']) ?></td>
-                    <td data-t="Cliente"><?= $sinRel ? '<span class="tenue">— sin relación —</span>' : escapar($c['nombre']) ?></td>
+                    <td data-t="Cliente"><?= $sinRel ? '<span class="tenue">— sin relación —</span>' : escapar($c['nombre']) ?>
+                        <?php if (count($idsUisp) === 1): ?><small class="bloque">UISP servicio #<?= (int) $idsUisp[0] ?></small>
+                        <?php elseif (count($idsUisp) > 1): ?><small class="bloque" style="color:var(--red)">UISP: varios servicios (#<?= escapar(implode(', #', $idsUisp)) ?>)</small><?php endif; ?></td>
                     <td data-t="Estado">
                         <?php if ($suspendido): ?>
                             <span class="pill susp">Suspendido</span>
@@ -743,12 +831,12 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                             <button class="b-plan" type="submit">Cambiar</button>
                         </form>
                         <?php endif; ?>
-                        <?php if ($porUisp): ?>
+                        <?php if ($porUisp && !$uispActivoRd): ?>
                             <span class="pill uisp" title="UISP lo tiene bloqueado. Si se reactiva aquí, el sincronizador lo vuelve a suspender en un minuto.">Reactivar en UISP</span>
                         <?php else: ?>
                         <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
                               data-confirmar="<?= $suspendido ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($nombreRd) ?>?"
-                              data-detalle="<?= $suspendido ? 'Vuelve a tener internet con su plan de siempre.' : 'Se le corta el internet de inmediato y verá el aviso de suspensión. Puedes reactivarlo después.' ?> MAC <?= escapar($c['mac']) ?>."
+                              data-detalle="<?= $suspendido ? 'Vuelve a tener internet con su plan de siempre.' : 'Se le corta el internet de inmediato y verá el aviso de suspensión. Puedes reactivarlo después.' ?> MAC <?= escapar($c['mac']) ?>.<?= $uispActivoRd ? (count($idsUisp) === 1 ? ' También se ' . ($suspendido ? 'reactiva' : 'suspende') . ' en UISP (servicio #' . $idsUisp[0] . ').' : ' No tiene servicio de UISP enlazado: en UISP no cambia.') : '' ?>"
                               data-verbo="<?= $suspendido ? 'Reactivar' : 'Suspender' ?> <?= escapar($c['ip']) ?>"
                               data-tono="<?= $suspendido ? 'bien' : 'peligro' ?>">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
