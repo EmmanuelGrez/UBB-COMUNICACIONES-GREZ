@@ -1,0 +1,7 @@
+# API RADIUS para UBB Pagos: todas las rutas /api-radius/v1/... las atiende index.php
+FallbackResource /api-radius/index.php
+
+# Herramienta de tokens: solo desde la terminal
+<Files "tokens.php">
+    Require all denied
+</Files>

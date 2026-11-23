@@ -168,7 +168,7 @@ function uispMarcarGracia(PDO $pdo, string $mac): void
 }
 
 /** Conexión al router para scripts de terminal: variable de entorno, archivo o (si hay terminal) se pregunta. */
-function uispConectarRouter(): Client
+function uispConectarRouter(?string $host = null): Client
 {
     $usuario = getenv('MIKROTIK_USER') ?: 'api-ubb';
     $pass = trim((string) (getenv('MIKROTIK_PASS') ?: @file_get_contents('/etc/ubb-panel/mikrotik-api.pass')));
@@ -183,7 +183,7 @@ function uispConectarRouter(): Client
         throw new RuntimeException('Falta la contraseña de la API del router (MIKROTIK_PASS o /etc/ubb-panel/mikrotik-api.pass).');
     }
     return new Client([
-        'host' => getenv('MIKROTIK_HOST') ?: '10.0.1.6',
+        'host' => $host ?: (getenv('MIKROTIK_HOST') ?: '10.0.1.6'),
         'user' => $usuario,
         'pass' => $pass,
         'port' => (int) (getenv('MIKROTIK_PORT') ?: 8728),
