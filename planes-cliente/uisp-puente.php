@@ -168,7 +168,7 @@ if (in_array('--explorar', $argv ?? [], true)) {
                     echo "   $campo => " . (is_scalar($valor) || $valor === null
                         ? var_export($valor, true)
                         : 'tipo ' . gettype($valor) . ' con ' . count((array) $valor) . ' elementos'
-                            . (is_array($valor) && $valor !== [] ? ' (llaves: ' . implode(',', array_keys((array) reset($valor) ?: [])) . ')' : '')) . "\n";
+                            . (is_array($valor) && $valor !== [] ? ' (llaves: ' . implode(',', array_keys((array) (array_values($valor)[0] ?? []))) . ')' : '')) . "\n";
                 }
             }
         }
