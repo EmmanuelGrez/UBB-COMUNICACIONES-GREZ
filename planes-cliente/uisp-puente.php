@@ -12,6 +12,7 @@
  *
  * Como prueba (solo consulta, no cambia nada):
  *   docker exec -it servidor-aviso php /var/www/html/planes-cliente/uisp-puente.php
+ *   ... uisp-puente.php --explorar   (además muestra campos de servicios y motivos de suspensión)
  */
 
 use RouterOS\Client;
@@ -138,5 +139,39 @@ foreach (['/version', '/clients?limit=1'] as $ruta) {
         echo "$paso) UISP $ruta: falló -> " . $e->getMessage() . "\n";
     }
     $paso++;
+}
+
+/* --explorar: muestra cómo guarda UISP los servicios (solo nombres de campos, sin datos de clientes). */
+if (in_array('--explorar', $argv ?? [], true)) {
+    echo "\n--- Explorar (solo consulta) ---\n";
+    $r = uispPorRouter($router, 'GET', '/service-suspension-reasons');
+    echo "Motivos de suspensión: ";
+    if ($r['ok']) {
+        foreach ((array) json_decode($r['datos'], true) as $m) {
+            echo "\n   id " . ($m['id'] ?? '?') . ': ' . ($m['name'] ?? '?');
+        }
+        echo "\n";
+    } else {
+        echo "falló -> {$r['error']}\n";
+    }
+
+    foreach ([1, 25, 50] as $n) {
+        $r = uispPorRouter($router, 'GET', "/clients/services?limit=$n");
+        echo "Servicios (limit=$n): " . ($r['ok'] ? strlen($r['datos']) . ' bytes' : "falló -> {$r['error']}") . "\n";
+        if ($n === 1 && $r['ok']) {
+            $lista = json_decode($r['datos'], true);
+            $serv = is_array($lista) ? ($lista[0] ?? []) : [];
+            echo "Campos de un servicio:\n   " . implode(', ', array_keys($serv)) . "\n";
+            foreach ($serv as $campo => $valor) {
+                if (stripos($campo, 'ip') !== false || stripos($campo, 'status') !== false
+                    || stripos($campo, 'site') !== false || stripos($campo, 'suspen') !== false) {
+                    echo "   $campo => " . (is_scalar($valor) || $valor === null
+                        ? var_export($valor, true)
+                        : 'tipo ' . gettype($valor) . ' con ' . count((array) $valor) . ' elementos'
+                            . (is_array($valor) && $valor !== [] ? ' (llaves: ' . implode(',', array_keys((array) reset($valor) ?: [])) . ')' : '')) . "\n";
+                }
+            }
+        }
+    }
 }
 echo "Listo. No se cambió nada.\n";
