@@ -58,7 +58,8 @@ function soloIp(string $ip): string
 
 try {
     $pdo = conectarBD();
-    if (!$simular) {
+    $tablasListas = count($pdo->query("SHOW TABLES LIKE 'ubb_uisp\\_%'")->fetchAll()) >= 2;
+    if (!$simular && !$tablasListas) {
         try {
             uispCrearTablas($pdo);
         } catch (Throwable $e) {
