@@ -383,6 +383,9 @@ try {
             + ['plan' => $despues['plan'], 'mensaje' => $mensaje];
     }
 
+    if ($simular) {
+        apiResponder(200, $respuesta);   // una simulación nunca deja el solicitud_id como usado
+    }
     $guardar = ['ok' => true] + $respuesta + ['fecha' => date('c')];
     $apiPdo->prepare('INSERT INTO ubb_api_solicitudes (solicitud_id, id_servicio, accion, respuesta) VALUES (?, ?, ?, ?)')
         ->execute([$solicitud, $idServicio, $accion, json_encode($guardar, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)]);
