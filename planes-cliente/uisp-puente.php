@@ -12,7 +12,8 @@
  *
  * Como prueba (solo consulta, no cambia nada):
  *   docker exec -it servidor-aviso php /var/www/html/planes-cliente/uisp-puente.php
- *   ... uisp-puente.php --explorar   (además muestra campos de servicios y motivos de suspensión)
+ *   ... uisp-puente.php --explorar       (campos de servicios y motivos de suspensión)
+ *   ... uisp-puente.php --explorar-nms   (camino servicio -> sitio -> equipo -> IP; requiere token NMS)
  */
 
 use RouterOS\Client;
@@ -20,6 +21,8 @@ use RouterOS\Query;
 
 const UISP_PUENTE_API = 'https://192.168.102.253:8445/crm/api/v1.0';
 const UISP_PUENTE_LLAVE = '/etc/ubb-panel/uisp-app.key';
+const UISP_PUENTE_NMS = 'https://192.168.102.253:8445/nms/api/v2.1';
+const UISP_PUENTE_TOKEN_NMS = '/etc/ubb-panel/uisp-nms.token';
 
 /** Lee la llave de la API de UISP guardada en el servidor. */
 function uispLlave(): string
@@ -31,17 +34,31 @@ function uispLlave(): string
     return $llave;
 }
 
+/** Lee el token (solo lectura) de la API de red de UISP (NMS). */
+function uispTokenNms(): string
+{
+    $t = trim((string) @file_get_contents(UISP_PUENTE_TOKEN_NMS));
+    if ($t === '') {
+        throw new RuntimeException('Falta el token de UISP NMS en ' . UISP_PUENTE_TOKEN_NMS . '.');
+    }
+    return $t;
+}
+
 /**
- * Llama a la API de UISP CRM usando el router como intermediario.
+ * Llama a la API de UISP usando el router como intermediario.
+ * $api = 'crm' (clientes y servicios) o 'nms' (equipos y sitios).
  * Devuelve ['ok' => bool, 'datos' => string (cuerpo de la respuesta), 'error' => string].
  */
-function uispPorRouter(Client $router, string $metodo, string $ruta, ?array $cuerpo = null): array
+function uispPorRouter(Client $router, string $metodo, string $ruta, ?array $cuerpo = null, string $api = 'crm'): array
 {
+    $cabecera = $api === 'nms'
+        ? 'x-auth-token: ' . uispTokenNms()
+        : 'X-Auth-App-Key: ' . uispLlave();
     $q = (new Query('/tool/fetch'))
-        ->equal('url', UISP_PUENTE_API . $ruta)
+        ->equal('url', ($api === 'nms' ? UISP_PUENTE_NMS : UISP_PUENTE_API) . $ruta)
         ->equal('http-method', strtolower($metodo))
         ->equal('check-certificate', 'no')
-        ->equal('http-header-field', 'X-Auth-App-Key: ' . uispLlave() . ',Content-Type: application/json')
+        ->equal('http-header-field', $cabecera . ',Content-Type: application/json')
         ->equal('output', 'user')
         ->equal('as-value', '');
     if ($cuerpo !== null) {
@@ -172,6 +189,49 @@ if (in_array('--explorar', $argv ?? [], true)) {
                 }
             }
         }
+    }
+}
+
+/* --explorar-nms: sigue el camino servicio CRM -> sitio -> equipos NMS -> IP, con 3 servicios. */
+if (in_array('--explorar-nms', $argv ?? [], true)) {
+    echo "\n--- Explorar NMS (solo consulta) ---\n";
+    try {
+        uispTokenNms();
+        echo "Token NMS: encontrado ✓\n";
+    } catch (Throwable $e) {
+        echo $e->getMessage() . "\n";
+        exit(1);
+    }
+    $r = uispPorRouter($router, 'GET', '/clients/services?limit=10&offset=10');
+    echo "Servicios (limit=10, offset=10): " . ($r['ok'] ? strlen($r['datos']) . ' bytes' : "falló -> {$r['error']}") . "\n";
+    $servicios = $r['ok'] ? (array) json_decode($r['datos'], true) : [];
+    $probados = 0;
+    foreach ($servicios as $sv) {
+        $sitio = (string) ($sv['unmsClientSiteId'] ?? '');
+        if ($sitio === '' || $probados >= 3) {
+            continue;
+        }
+        $probados++;
+        echo "\nServicio " . ($sv['id'] ?? '?') . " (estado " . ($sv['status'] ?? '?') . "), sitio $sitio\n";
+        $d = uispPorRouter($router, 'GET', '/devices?siteId=' . rawurlencode($sitio), null, 'nms');
+        if (!$d['ok']) {
+            echo "   equipos: falló -> {$d['error']}\n";
+            continue;
+        }
+        $equipos = (array) json_decode($d['datos'], true);
+        echo "   equipos en el sitio: " . count($equipos) . " (" . strlen($d['datos']) . " bytes)\n";
+        foreach (array_slice($equipos, 0, 3) as $eq) {
+            echo "   - modelo " . ($eq['identification']['model'] ?? '?')
+                . ", rol " . ($eq['identification']['role'] ?? '?')
+                . ", ipAddress " . var_export($eq['ipAddress'] ?? null, true)
+                . ", mac " . ($eq['identification']['mac'] ?? '?') . "\n";
+        }
+        if ($probados === 1 && isset($equipos[0])) {
+            echo "   campos de un equipo: " . implode(', ', array_keys($equipos[0])) . "\n";
+        }
+    }
+    if ($probados === 0) {
+        echo "Ninguno de esos 10 servicios tiene sitio enlazado.\n";
     }
 }
 echo "Listo. No se cambió nada.\n";
