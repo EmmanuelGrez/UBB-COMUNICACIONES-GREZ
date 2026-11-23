@@ -50,14 +50,24 @@ function uispPorRouter(Client $router, string $metodo, string $ruta, ?array $cue
     $datos = '';
     $estado = '';
     $error = '';
-    foreach ($router->query($q)->read() as $fila) {
-        if (!is_array($fila)) {
-            continue;
-        }
-        $estado = $fila['status'] ?? $estado;
-        $datos .= $fila['data'] ?? '';
-        if (isset($fila['message'])) {
-            $error = (string) $fila['message'];
+    // La librería del router lanza avisos "Deprecated: chr()" con palabras largas; no afectan.
+    $nivel = error_reporting(error_reporting() & ~E_DEPRECATED);
+    try {
+        $respuesta = $router->query($q)->read(false);
+    } finally {
+        error_reporting($nivel);
+    }
+    // Respuesta cruda: líneas como "!re", "=status=finished", "=data=...", "!trap", "=message=..."
+    foreach ($respuesta as $linea) {
+        $linea = (string) $linea;
+        if (preg_match('/^=([a-z-]+)=(.*)$/s', $linea, $m)) {
+            if ($m[1] === 'status') {
+                $estado = $m[2];
+            } elseif ($m[1] === 'data') {
+                $datos .= $m[2];
+            } elseif ($m[1] === 'message' || $m[1] === 'failure') {
+                $error = $m[2];
+            }
         }
     }
     $ok = $error === '' && $estado === 'finished';
