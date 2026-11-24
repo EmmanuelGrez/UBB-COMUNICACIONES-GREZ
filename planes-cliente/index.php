@@ -11,7 +11,13 @@ session_start();
 
 date_default_timezone_set('America/Mexico_City');
 
-$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'radius-dhcp', 'radius-pppoe', 'bitacora'];
+// "Gestión de cambios" (solicitudes/historial) se retiró del menú; el código y la tabla historial_cambios
+// se conservan. Los enlaces viejos llevan a la Bitácora.
+$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'radius-dhcp', 'radius-pppoe', 'bitacora'];
+if (in_array($_GET['modulo'] ?? '', ['solicitudes', 'historial'], true)) {
+    header('Location: ?modulo=bitacora');
+    exit;
+}
 $moduloActual = (string) ($_GET['modulo'] ?? 'inicio');
 if (!in_array($moduloActual, $modulosPermitidos, true)) {
     $moduloActual = 'inicio';
