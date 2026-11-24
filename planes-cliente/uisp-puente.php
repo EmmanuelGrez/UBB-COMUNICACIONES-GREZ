@@ -158,6 +158,33 @@ function uispPorRouterGrande(Client $router, string $ruta, string $api = 'nms'):
     }
 }
 
+/**
+ * Camino directo a UISP sin el límite de 64 KB: el router MKR-FSL02 reenvía 10.0.1.6:18445 -> UISP 8445
+ * (regla NAT "Panel UBB -> UISP", solo para este servidor). Solo GET.
+ */
+const UISP_DIRECTO = 'https://10.0.1.6:18445';
+
+function uispDirecto(string $ruta, string $api = 'nms'): array
+{
+    $base = UISP_DIRECTO . ($api === 'nms' ? '/nms/api/v2.1' : '/crm/api/v1.0');
+    $cabecera = $api === 'nms' ? 'x-auth-token: ' . uispTokenNms() : 'X-Auth-App-Key: ' . uispLlave();
+    $ctx = stream_context_create([
+        'http' => ['method' => 'GET', 'header' => $cabecera . "\r\nAccept: application/json\r\n", 'timeout' => 60, 'ignore_errors' => true],
+        'ssl' => ['verify_peer' => false, 'verify_peer_name' => false],
+    ]);
+    $datos = @file_get_contents($base . $ruta, false, $ctx);
+    $codigo = 0;
+    foreach ($http_response_header ?? [] as $h) {
+        if (preg_match('#^HTTP/\S+\s+(\d{3})#', $h, $m)) {
+            $codigo = (int) $m[1];
+        }
+    }
+    if ($datos === false || $codigo === 0) {
+        return ['ok' => false, 'datos' => '', 'error' => 'sin conexión directa con UISP (' . UISP_DIRECTO . '). ¿Sigue la regla NAT "Panel UBB -> UISP"?'];
+    }
+    return ['ok' => $codigo >= 200 && $codigo < 300, 'datos' => (string) $datos, 'error' => $codigo >= 300 ? "HTTP $codigo" : ''];
+}
+
 /* ---------- Sincronizar acciones del panel con UISP ---------- */
 
 const UISP_PUENTE_ACTIVO = '/etc/ubb-panel/uisp-sync-activo';   // si existe este archivo, el panel avisa a UISP
