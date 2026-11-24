@@ -276,7 +276,11 @@ try {
     // Token de pruebas: solo sus servicios.
     if (isset($token['servicios']) && is_array($token['servicios'])
         && !in_array($idServicio, array_map('intval', $token['servicios']), true)) {
-        throw new ApiError(401, 'NO_AUTORIZADO', 'Este token solo puede usar el servicio de prueba.');
+        throw new ApiError(401, 'NO_AUTORIZADO', 'Este token no tiene permiso para este servicio.');
+    }
+    // Token de solo consulta: nunca suspende ni reactiva.
+    if (!empty($token['solo_lectura']) && $accion !== '') {
+        throw new ApiError(403, 'SOLO_LECTURA', 'Este token solo puede consultar estados; no puede suspender ni reactivar.');
     }
 
     /* --- GET /servicios/{id} --- */
