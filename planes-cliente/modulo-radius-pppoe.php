@@ -401,7 +401,12 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     <?php if ($flashPpOk !== ''): ?><div class="ok"><?= escapar($flashPpOk) ?></div><?php endif; ?>
     <?php if ($flashPpError !== ''): ?><div class="error"><?= escapar($flashPpError) ?></div><?php endif; ?>
 
-    <details class="caja plegable" <?= ($flashPpError !== '' || $soloRadiusPp !== []) ? 'open' : '' ?>>
+    <?php
+    // Viene de "Avisos de equipos": modelo y MAC ya llenos.
+    $altaMacPp = preg_match('/^[0-9A-F:.-]{12,17}$/i', (string) ($_GET['alta_mac'] ?? '')) ? strtoupper((string) $_GET['alta_mac']) : '';
+    $altaModeloPp = in_array((string) ($_GET['alta_modelo'] ?? ''), PP_MODELOS, true) ? (string) $_GET['alta_modelo'] : '';
+    ?>
+    <details class="caja plegable" id="pp-alta" <?= ($flashPpError !== '' || $soloRadiusPp !== [] || $altaMacPp !== '') ? 'open' : '' ?>>
         <summary>Dar de alta una cuenta PPPoE nueva en RADIUS</summary>
         <p class="sub" style="margin:0 0 12px">Solo crea cuentas nuevas; no cambia ninguna existente. Revisa que el usuario no exista
             en el router ni en RADIUS. El usuario se arma solo: <b>UBB-</b> + modelo + últimos 5 de la MAC LAN.
@@ -423,12 +428,12 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                 <label for="pp-modelo">Modelo del módem</label>
                 <select id="pp-modelo" name="modelo" required>
                     <option value="">Elige…</option>
-                    <?php foreach (PP_MODELOS as $m): ?><option value="<?= escapar($m) ?>"><?= escapar($m) ?></option><?php endforeach; ?>
+                    <?php foreach (PP_MODELOS as $m): ?><option value="<?= escapar($m) ?>" <?= $m === $altaModeloPp ? 'selected' : '' ?>><?= escapar($m) ?></option><?php endforeach; ?>
                 </select>
             </div>
             <div>
                 <label for="pp-mac">MAC LAN del módem</label>
-                <input id="pp-mac" name="mac" class="mono" placeholder="98:25:4A:EF:AA:8F" required autocomplete="off" aria-describedby="pp-mac-msg">
+                <input id="pp-mac" name="mac" class="mono" value="<?= escapar($altaMacPp) ?>" placeholder="98:25:4A:EF:AA:8F" required autocomplete="off" aria-describedby="pp-mac-msg">
                 <small class="campo-msg" id="pp-mac-msg" aria-live="polite"></small>
             </div>
             <div>
