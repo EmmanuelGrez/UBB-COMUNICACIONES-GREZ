@@ -368,6 +368,132 @@ function rdUispAntesDeReactivar(PDO $pdo, Client $router, string $mac, string $i
     return " También quedó activo en UISP (servicio #$id).";
 }
 
+/* ---------- Concesiones fijas (static leases) que no pasan por RADIUS ---------- */
+
+const RD_CLAVE_ACCIONES = '/etc/ubb-panel/clave-acciones.hash';
+
+/** ¿Hay clave configurada para las acciones delicadas del panel? */
+function rdClaveConfigurada(): bool
+{
+    return trim((string) @file_get_contents(RD_CLAVE_ACCIONES)) !== '';
+}
+
+/** Compara la clave escrita con la guardada (solo se guarda su hash). */
+function rdVerificarClave(string $clave): bool
+{
+    $hash = trim((string) @file_get_contents(RD_CLAVE_ACCIONES));
+    return $hash !== '' && $clave !== '' && password_verify($clave, $hash);
+}
+
+/**
+ * Concesiones fijas de un servidor DHCP que no pasan por RADIUS
+ * (sin contar las dinámicas, las de RADIUS, las deshabilitadas ni las de bloqueo).
+ */
+function rdConcesionesFijas(Client $router, string $servidor): array
+{
+    $si = fn (array $f, string $k): bool => in_array(strtolower((string) ($f[$k] ?? 'false')), ['true', 'yes'], true);
+    $fijas = [];
+    foreach (rdRouter($router, (new Query('/ip/dhcp-server/lease/print'))->where('server', $servidor)) as $f) {
+        if (!is_array($f) || !isset($f['.id'])
+            || $si($f, 'dynamic') || $si($f, 'radius') || $si($f, 'block-access') || $si($f, 'disabled')) {
+            continue;
+        }
+        $fijas[] = [
+            'id' => (string) $f['.id'],
+            'mac' => strtoupper((string) ($f['mac-address'] ?? '')),
+            'ip' => (string) ($f['address'] ?? ''),
+            'listas' => (string) ($f['address-lists'] ?? ''),
+            'equipo' => (string) ($f['host-name'] ?? ''),
+            'comentario' => (string) ($f['comment'] ?? ''),
+            'estado' => (string) ($f['status'] ?? ''),
+        ];
+    }
+    usort($fijas, fn ($a, $b) => ip2long($a['ip']) <=> ip2long($b['ip']));
+    return $fijas;
+}
+
+/**
+ * Revisa si una concesión fija se puede pasar a RADIUS.
+ * Devuelve ['plan' => lista a usar, 'problema' => null o el motivo por el que no se puede].
+ */
+function rdRevisarFija(PDO $pdo, array $cfg, array $fija, array $planes): array
+{
+    $plan = $cfg['lista'];
+    foreach (array_filter(array_map('trim', explode(',', $fija['listas']))) as $l) {
+        if (in_array($l, $planes, true)) {
+            $plan = $l;
+            break;
+        }
+    }
+    try {
+        $mac = rdNormalizarMac($fija['mac']);
+    } catch (Throwable $e) {
+        return ['plan' => $plan, 'problema' => 'La MAC no es válida.'];
+    }
+    $octeto = substr($fija['ip'], strlen($cfg['prefijo']));
+    if (strpos($fija['ip'], $cfg['prefijo']) !== 0 || !ctype_digit($octeto)
+        || (int) $octeto < $cfg['desde'] || (int) $octeto > $cfg['hasta']) {
+        return ['plan' => $plan, 'problema' => 'Su IP está fuera del rango de la VLAN.'];
+    }
+    $st = $pdo->prepare('SELECT COUNT(*) FROM radcheck WHERE username = ?');
+    $st->execute([$mac]);
+    if ((int) $st->fetchColumn() > 0) {
+        return ['plan' => $plan, 'problema' => 'Esa MAC ya está en RADIUS; la concesión fija sobra (revísalo con el ingeniero).'];
+    }
+    $st = $pdo->prepare("SELECT username FROM radreply WHERE attribute = 'Framed-IP-Address' AND value = ?");
+    $st->execute([$fija['ip']]);
+    if ($otro = $st->fetchColumn()) {
+        return ['plan' => $plan, 'problema' => "Esa IP ya la tiene en RADIUS $otro."];
+    }
+    return ['plan' => $plan, 'problema' => null];
+}
+
+/**
+ * Pasa a RADIUS un equipo que hoy tiene concesión fija: lo da de alta con su misma IP y su plan,
+ * le pone su plan temporal en el router y quita la concesión fija (solo la de esta VLAN).
+ * Si algo falla en el router, RADIUS no cambia.
+ */
+function rdPasarARadius(PDO $pdo, Client $router, array $cfg, string $mac, array $planes, string $origen = 'PANEL'): string
+{
+    $mac = rdNormalizarMac($mac);
+    $fijas = array_values(array_filter(rdConcesionesFijas($router, $cfg['servidor']), fn ($f) => $f['mac'] === $mac));
+    if (count($fijas) !== 1) {
+        throw new RuntimeException("No encontré una única concesión fija de $mac en " . $cfg['servidor'] . '. Recarga la pantalla.');
+    }
+    $fija = $fijas[0];
+    $rev = rdRevisarFija($pdo, $cfg, $fija, $planes);
+    if ($rev['problema'] !== null) {
+        throw new RuntimeException("$mac: " . $rev['problema']);
+    }
+    $ip = $fija['ip'];
+    $plan = $rev['plan'];
+    $renueva = rdSegundosParaRenovar($router, $mac, $ip, $cfg['servidor']);
+
+    $pdo->beginTransaction();
+    try {
+        $pdo->prepare("INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Auth-Type', ':=', 'Accept')")->execute([$mac]);
+        $ins = $pdo->prepare("INSERT INTO radreply (username, attribute, op, value) VALUES (?, ?, ':=', ?)");
+        $ins->execute([$mac, 'Framed-IP-Address', $ip]);
+        $ins->execute([$mac, 'Mikrotik-Address-List', $plan]);
+        // Primero el plan temporal, luego quitar la concesión fija: así no se queda ni un momento sin plan.
+        $nota = rdPuenteTemporal($router, $mac, $ip, $plan, $renueva);
+        rdRouter($router, (new Query('/ip/dhcp-server/lease/remove'))->equal('.id', $fija['id']));
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+        try {
+            rdQuitarTemporales($router, $ip);
+        } catch (Throwable $e2) {
+        }
+        throw new RuntimeException("No se pasó $mac a RADIUS (no cambió nada): " . $e->getMessage());
+    }
+    $detalle = "concesión fija -> RADIUS ($plan)" . ($fija['comentario'] !== '' ? '; comentario: ' . $fija['comentario'] : '');
+    rdBitacora($pdo, $mac, $ip, 'pasar-radius', $detalle, $origen);
+    return "Pasado a RADIUS: $mac conserva la IP $ip con $plan. $nota";
+}
+
 /* ---------- Suspender y reactivar (mismo código para el panel y la API) ---------- */
 
 /**
