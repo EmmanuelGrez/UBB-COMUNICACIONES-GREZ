@@ -3,6 +3,7 @@
  * API RADIUS para UBB Pagos (v1).
  *
  *   GET  /api-radius/v1/salud
+ *   GET  /api-radius/v1/servicios                 lista con estado (todos los relacionados, o ?ids=1,2,3)
  *   GET  /api-radius/v1/servicios/{id_servicio}
  *   POST /api-radius/v1/servicios/{id_servicio}/suspender
  *   POST /api-radius/v1/servicios/{id_servicio}/reactivar
@@ -89,11 +90,15 @@ function apiPdoRadius(): PDO
 
 function apiPdoJamileth(): PDO
 {
+    static $pdo = null;
+    if ($pdo instanceof PDO) {
+        return $pdo;
+    }
     $pass = rtrim((string) @file_get_contents(API_CREDENCIAL_JAMILETH), "\r\n");
     if ($pass === '') {
         throw new RuntimeException('No se puede leer la credencial de la base de UBB Pagos.');
     }
-    return new PDO('mysql:host=192.168.100.221;port=3306;dbname=ubb_plataforma;charset=utf8mb4', 'equipo_ubb', $pass, [
+    return $pdo = new PDO('mysql:host=192.168.100.221;port=3306;dbname=ubb_plataforma;charset=utf8mb4', 'equipo_ubb', $pass, [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
         PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
         PDO::ATTR_EMULATE_PREPARES => false,
@@ -263,6 +268,83 @@ try {
             'componentes' => $partes,
             'token' => $token['nombre'] ?? '',
             'mensaje' => $todo ? 'Todo responde.' : 'Algún componente no responde.',
+        ]);
+    }
+
+    /* --- GET /servicios : estado de varios servicios en una sola petición (solo lectura) --- */
+    if ($sub === '/servicios') {
+        if ($metodo !== 'GET') {
+            throw new ApiError(404, 'NO_EXISTE', 'Usa GET para listar servicios.');
+        }
+        $ids = [];
+        $textoIds = trim((string) ($_GET['ids'] ?? ''));
+        if ($textoIds !== '') {
+            foreach (explode(',', $textoIds) as $i) {
+                $i = trim($i);
+                if (!ctype_digit($i) || strlen($i) > 10) {
+                    throw new ApiError(400, 'DATOS_INVALIDOS', 'ids debe ser una lista de números separados por coma.');
+                }
+                $ids[(int) $i] = true;
+            }
+            $ids = array_keys($ids);
+            if (count($ids) > 1000) {
+                throw new ApiError(400, 'DATOS_INVALIDOS', 'Máximo 1000 ids por consulta.');
+            }
+        } else {
+            try {
+                $ids = array_map('intval', apiPdoJamileth()->query(
+                    "SELECT DISTINCT id_servicio FROM integracion_winbox
+                     WHERE tipo_fuente = 'DHCP' AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND id_servicio IS NOT NULL
+                     ORDER BY id_servicio")->fetchAll(PDO::FETCH_COLUMN));
+            } catch (Throwable $e) {
+                error_log('API RADIUS: sin lista de UBB Pagos: ' . $e->getMessage());
+                throw new ApiError(500, 'ERROR_INTERNO', 'No se pudo consultar la base de UBB Pagos.');
+            }
+        }
+        if (isset($token['servicios']) && is_array($token['servicios'])) {
+            $ids = array_values(array_intersect($ids, array_map('intval', $token['servicios'])));
+        }
+        $filtro = strtoupper(trim((string) ($_GET['estado'] ?? '')));
+        if (!in_array($filtro, ['', 'ACTIVO', 'SUSPENDIDO'], true)) {
+            throw new ApiError(400, 'DATOS_INVALIDOS', 'estado debe ser ACTIVO o SUSPENDIDO.');
+        }
+        @set_time_limit(120);
+        $lista = [];
+        $cuenta = ['ACTIVO' => 0, 'SUSPENDIDO' => 0, 'SIN_DATOS' => 0];
+        foreach ($ids as $id) {
+            try {
+                $eq = apiBuscarEquipo($apiPdo, $id);
+                $estado = apiEstado($apiPdo, $eq);
+                $cuenta[$estado['estado']]++;
+                if ($filtro !== '' && $estado['estado'] !== $filtro) {
+                    continue;
+                }
+                $lista[] = [
+                    'id_servicio' => $id,
+                    'estado_actual' => $estado['estado'],
+                    'suspendido_por' => $estado['suspendido_por'],
+                    'tipo' => $eq['tipo'],
+                    'ip' => $eq['ip'],
+                    'mac' => $eq['mac'],
+                    'plan' => $estado['plan'],
+                    'vlan' => $eq['cfg']['vlan'],
+                ];
+            } catch (ApiError $e) {
+                if ($e->http >= 500) {
+                    throw $e;
+                }
+                $cuenta['SIN_DATOS']++;
+                if ($filtro === '') {
+                    $lista[] = ['id_servicio' => $id, 'estado_actual' => null, 'error' => $e->resultado, 'mensaje' => $e->getMessage()];
+                }
+            }
+        }
+        apiResponder(200, [
+            'resultado' => 'LISTA',
+            'total' => count($lista),
+            'resumen' => $cuenta,
+            'servicios' => $lista,
+            'mensaje' => 'Consulta sin cambios.',
         ]);
     }
 
