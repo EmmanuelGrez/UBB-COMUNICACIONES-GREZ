@@ -188,9 +188,9 @@ usort($filas, fn ($a, $b) => [$a[0], $a[9], $a[3]] <=> [$b[0], $b[9], $b[3]]);
 
 if ($csv) {
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['tipo', 'equipo', 'rol', 'ip', 'mac', 'usuario_radius', 'lista_o_perfil_actual', 'conectado', 'servicio_ubb_pagos', 'resultado']);
+    fputcsv($out, ['tipo', 'equipo', 'rol', 'ip', 'mac', 'usuario_radius', 'lista_o_perfil_actual', 'conectado', 'servicio_ubb_pagos', 'resultado'], ',', '"', '');
     foreach ($filas as $f) {
-        fputcsv($out, $f);
+        fputcsv($out, $f, ',', '"', '');
     }
     exit;
 }
