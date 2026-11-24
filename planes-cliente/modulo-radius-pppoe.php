@@ -1,9 +1,9 @@
 <?php
 /*
  * CLIENTES PPPoE EN RADIUS  (?modulo=radius-pppoe)
- * Fase 1 - SOLO CONSULTA: lee el router (usuarios, sesiones, listas) y la base radius.
- * No cambia nada en MikroTik ni en RADIUS. Los botones se activarán por cliente
- * cuando ese cliente esté migrado a RADIUS.
+ * Lee el router (usuarios, sesiones, listas) y la base radius; no cambia nada en MikroTik.
+ * Única escritura: "Dar de alta una cuenta PPPoE nueva en RADIUS" (radcheck/radreply), que nunca
+ * modifica cuentas existentes. Los botones de suspender/cambiar plan se activan en la fase 2.
  *
  * Usa del index.php: $dbConfig, $mikrotikConfig, obtenerPDO(), crearClienteMikrotik(), escapar().
  */
@@ -24,6 +24,41 @@ function ppLeer(Client $router, Query $query): array
     return array_values(array_filter($respuesta, fn ($f) => is_array($f) && isset($f['.id'])));
 }
 
+const PP_RED_INICIO = '10.2.0.2';
+const PP_RED_FIN = '10.2.3.254';
+const PP_GATEWAY = '10.2.0.1';
+
+/** Perfiles que se pueden asignar en una alta (los de clientes; nunca los de prueba). */
+function ppPerfilesAlta(array $perfiles): array
+{
+    return array_values(array_filter(array_keys($perfiles), fn ($p) => stripos($p, 'pro-pppoe') === 0));
+}
+
+/** Primera IP libre de la red PPPoE (sin .0, .255 ni el gateway) que no use nadie en el router ni en RADIUS. */
+function ppIpLibre(array $usadas): string
+{
+    for ($n = ip2long(PP_RED_INICIO); $n <= ip2long(PP_RED_FIN); $n++) {
+        $ip = long2ip($n);
+        $ultimo = $n & 255;
+        if ($ultimo === 0 || $ultimo === 255 || $ip === PP_GATEWAY || isset($usadas[$ip])) {
+            continue;
+        }
+        return $ip;
+    }
+    return '';
+}
+
+/** Contraseña fácil de dictar: 10 caracteres sin letras/números que se confunden. */
+function ppGenerarPass(): string
+{
+    $abc = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+    $p = '';
+    for ($i = 0; $i < 10; $i++) {
+        $p .= $abc[random_int(0, strlen($abc) - 1)];
+    }
+    return $p;
+}
+
 function ppPlan(string $perfil): string
 {
     if (preg_match('/(\d+)\s*m$/i', $perfil, $m)) {
@@ -41,6 +76,20 @@ $errorPp = '';
 $clientesPp = [];
 $enRadiusPp = [];
 $perfilesPp = [];
+$ipsUsadasPp = [];
+$secretsPp = [];
+$soloRadiusPp = [];
+$routerOkPp = false;
+$pdoPp = null;
+
+$csrfPp = $_SESSION['csrf_radius_pppoe'] ?? '';
+if (!is_string($csrfPp) || $csrfPp === '') {
+    $csrfPp = bin2hex(random_bytes(32));
+    $_SESSION['csrf_radius_pppoe'] = $csrfPp;
+}
+$flashPpOk = $_SESSION['flash_radius_pppoe_ok'] ?? '';
+$flashPpError = $_SESSION['flash_radius_pppoe_error'] ?? '';
+unset($_SESSION['flash_radius_pppoe_ok'], $_SESSION['flash_radius_pppoe_error']);
 
 try {
     $configRouterPp = $mikrotikConfig;
@@ -50,6 +99,9 @@ try {
     $activos = [];
     foreach (ppLeer($routerPp, new Query('/ppp/active/print', ['=.proplist=.id,name,address,uptime,caller-id'])) as $a) {
         $activos[strtolower((string) ($a['name'] ?? ''))] = $a;
+        if (!empty($a['address'])) {
+            $ipsUsadasPp[(string) $a['address']] = true;
+        }
     }
     $bloqueadosUisp = [];
     foreach (ppLeer($routerPp, (new Query('/ip/firewall/address-list/print', ['=.proplist=.id,address']))->where('list', PP_LISTA_UISP)) as $f) {
@@ -68,6 +120,10 @@ try {
             continue;
         }
         $ip = (string) ($s['remote-address'] ?? '');
+        $secretsPp[strtolower($usuario)] = true;
+        if ($ip !== '') {
+            $ipsUsadasPp[$ip] = true;
+        }
         $activo = $activos[strtolower($usuario)] ?? null;
         $clientesPp[] = [
             'usuario' => $usuario,
@@ -85,6 +141,7 @@ try {
         ];
     }
     usort($clientesPp, fn ($a, $b) => strnatcasecmp($a['ip'], $b['ip']) ?: strnatcasecmp($a['usuario'], $b['usuario']));
+    $routerOkPp = true;
 } catch (Throwable $e) {
     error_log('UBB RADIUS PPPoE: ' . $e->getMessage());
     $errorPp = 'No fue posible leer los clientes PPPoE del router (' . PP_ROUTER . ').';
@@ -106,6 +163,91 @@ foreach ($clientesPp as &$c) {
 }
 unset($c);
 
+/* Cuentas PPPoE dadas de alta solo en RADIUS (IP de la red PPPoE y sin cuenta local en el router) */
+if ($pdoPp instanceof PDO) {
+    try {
+        $st = $pdoPp->query("SELECT ip.username, ip.value AS ip, gr.value AS perfil
+                             FROM radreply ip
+                             LEFT JOIN radreply gr ON gr.username = ip.username AND gr.attribute = 'Mikrotik-Group'
+                             WHERE ip.attribute = 'Framed-IP-Address' AND ip.value LIKE '10.2.%'");
+        foreach ($st->fetchAll() as $f) {
+            $ipsUsadasPp[(string) $f['ip']] = true;
+            if (!isset($secretsPp[strtolower((string) $f['username'])])) {
+                $soloRadiusPp[] = $f;
+            }
+        }
+        usort($soloRadiusPp, fn ($a, $b) => strnatcasecmp($a['ip'], $b['ip']));
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS PPPoE: sin cuentas de RADIUS: ' . $e->getMessage());
+    }
+}
+$perfilesAltaPp = ppPerfilesAlta($perfilesPp);
+$ipSugeridaPp = ppIpLibre($ipsUsadasPp);
+
+/* ---------- Alta de una cuenta PPPoE nueva en RADIUS ---------- */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_pppoe') {
+    try {
+        if (!hash_equals($csrfPp, (string) ($_POST['csrf_radius_pppoe'] ?? ''))) {
+            throw new RuntimeException('La sesión del formulario venció. Recarga la pantalla.');
+        }
+        if (!$routerOkPp || !($pdoPp instanceof PDO)) {
+            throw new RuntimeException('Sin conexión con el router o con RADIUS: no se puede revisar que el usuario y la IP estén libres.');
+        }
+        $usuario = trim((string) ($_POST['usuario'] ?? ''));
+        $perfil = (string) ($_POST['perfil'] ?? '');
+        $pass = trim((string) ($_POST['pass'] ?? ''));
+        $generada = false;
+        if ($pass === '') {
+            $pass = ppGenerarPass();
+            $generada = true;
+        }
+        if (!preg_match('/^[A-Za-z0-9._@-]{3,64}$/', $usuario)) {
+            throw new RuntimeException('Usuario no válido: 3 a 64 caracteres, solo letras, números y . _ @ -');
+        }
+        if (!preg_match('/^[A-Za-z0-9._@#*+=!?-]{6,64}$/', $pass)) {
+            throw new RuntimeException('Contraseña no válida: 6 a 64 caracteres, sin espacios ni acentos.');
+        }
+        if (!in_array($perfil, $perfilesAltaPp, true)) {
+            throw new RuntimeException('Elige un perfil de la lista.');
+        }
+        if (isset($secretsPp[strtolower($usuario)])) {
+            throw new RuntimeException("El usuario $usuario ya existe en el router (/ppp secret). No se dio de alta.");
+        }
+        $st = $pdoPp->prepare('SELECT COUNT(*) FROM radcheck WHERE username = ?');
+        $st->execute([$usuario]);
+        if ((int) $st->fetchColumn() > 0) {
+            throw new RuntimeException("El usuario $usuario ya existe en RADIUS. No se dio de alta.");
+        }
+        $ip = ppIpLibre($ipsUsadasPp);   // se calcula de nuevo al guardar, no se confía en la del formulario
+        if ($ip === '') {
+            throw new RuntimeException('No quedan IPs libres en la red PPPoE 10.2.0.0/22.');
+        }
+        $pdoPp->beginTransaction();
+        $pdoPp->prepare("INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)")
+            ->execute([$usuario, $pass]);
+        $ins = $pdoPp->prepare("INSERT INTO radreply (username, attribute, op, value) VALUES (?, ?, ':=', ?)");
+        $ins->execute([$usuario, 'Framed-IP-Address', $ip]);
+        $ins->execute([$usuario, 'Mikrotik-Group', $perfil]);
+        $pdoPp->commit();
+        try {
+            $pdoPp->prepare("INSERT INTO ubb_bitacora (mac, ip, accion, detalle, origen) VALUES ('', ?, 'alta-pppoe', ?, 'PANEL')")
+                ->execute([$ip, "usuario $usuario, perfil $perfil"]);
+        } catch (Throwable $e) {
+            error_log('UBB RADIUS PPPoE: sin bitácora: ' . $e->getMessage());
+        }
+        $_SESSION['flash_radius_pppoe_ok'] = "Alta lista en RADIUS: usuario $usuario, IP fija $ip, perfil $perfil."
+            . ($generada ? " Contraseña generada: $pass (anótala para configurar el módem; no se vuelve a mostrar)." : '')
+            . ' Se conectará por RADIUS cuando esté encendido RADIUS para PPPoE en el router.';
+    } catch (Throwable $e) {
+        if ($pdoPp instanceof PDO && $pdoPp->inTransaction()) {
+            $pdoPp->rollBack();
+        }
+        $_SESSION['flash_radius_pppoe_error'] = $e->getMessage();
+    }
+    header('Location: ?modulo=radius-pppoe');
+    exit;
+}
+
 $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
@@ -124,6 +266,58 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         (<?= $migradosPp ?> de <?= $totalPp ?> hoy). Para suspender o reactivar mientras tanto, usa UISP.</div>
 
     <?php if ($errorPp !== ''): ?><div class="error"><?= escapar($errorPp) ?></div><?php endif; ?>
+    <?php if ($flashPpOk !== ''): ?><div class="ok"><?= escapar($flashPpOk) ?></div><?php endif; ?>
+    <?php if ($flashPpError !== ''): ?><div class="error"><?= escapar($flashPpError) ?></div><?php endif; ?>
+
+    <details class="caja plegable" <?= ($flashPpError !== '' || $soloRadiusPp !== []) ? 'open' : '' ?>>
+        <summary>Dar de alta una cuenta PPPoE nueva en RADIUS</summary>
+        <p class="sub" style="margin:0 0 12px">Solo crea cuentas nuevas; no cambia ninguna existente. Revisa que el usuario no exista
+            en el router ni en RADIUS y le asigna la siguiente IP libre de 10.2.0.0/22, que será siempre la misma.
+            Mientras RADIUS para PPPoE no esté encendido en el router, la cuenta queda lista pero no se usa.</p>
+        <?php if (!$routerOkPp): ?>
+            <div class="aviso">Sin conexión con el router: no se puede dar de alta ahora.</div>
+        <?php else: ?>
+        <form class="alta" method="post" action="?modulo=radius-pppoe"
+              data-confirmar="¿Dar de alta esta cuenta PPPoE en RADIUS?"
+              data-detalle="Se crea el usuario con la IP fija <?= escapar($ipSugeridaPp) ?> (o la siguiente libre al guardar) y el perfil elegido. No cambia ninguna cuenta existente."
+              data-verbo="Dar de alta">
+            <input type="hidden" name="csrf_radius_pppoe" value="<?= escapar($csrfPp) ?>">
+            <input type="hidden" name="accion" value="alta_pppoe">
+            <div>
+                <label for="pp-usuario">Usuario</label>
+                <input id="pp-usuario" name="usuario" placeholder="UBB-TP123456" required pattern="[A-Za-z0-9._@\-]{3,64}" autocomplete="off">
+            </div>
+            <div>
+                <label for="pp-pass">Contraseña</label>
+                <input id="pp-pass" name="pass" placeholder="vacía = se genera una" autocomplete="new-password">
+            </div>
+            <div>
+                <label for="pp-perfil">Perfil</label>
+                <select id="pp-perfil" name="perfil" required>
+                    <option value="">Elige…</option>
+                    <?php foreach ($perfilesAltaPp as $p): ?><option value="<?= escapar($p) ?>"><?= escapar($p) ?> (<?= escapar(ppPlan($p)) ?>)</option><?php endforeach; ?>
+                </select>
+            </div>
+            <div>
+                <label>IP fija</label>
+                <input value="<?= escapar($ipSugeridaPp ?: 'sin IPs libres') ?>" readonly class="mono" aria-label="IP fija que se asignará">
+            </div>
+            <button class="b-alta" type="submit">Dar de alta</button>
+        </form>
+        <?php endif; ?>
+        <?php if ($soloRadiusPp !== []): ?>
+            <h3 style="margin:18px 0 8px;font-size:15px">Cuentas dadas de alta solo en RADIUS (<?= count($soloRadiusPp) ?>)</h3>
+            <div class="tabla"><table>
+                <thead><tr><th>IP fija</th><th>Usuario</th><th>Perfil</th></tr></thead>
+                <tbody>
+                <?php foreach ($soloRadiusPp as $f): ?>
+                    <tr><td data-t="IP" class="mono"><?= escapar($f['ip']) ?></td><td data-t="Usuario"><b><?= escapar($f['username']) ?></b></td>
+                        <td data-t="Perfil" class="mono"><?= escapar((string) ($f['perfil'] ?? '—')) ?></td></tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table></div>
+        <?php endif; ?>
+    </details>
 
     <section class="general">
         <div class="g-total"><b><?= $totalPp ?></b><span>clientes PPPoE<br>en el router</span></div>
