@@ -70,6 +70,47 @@ try {
     // sin mapa: no se puede avisar de equipos que también están ligados a un servicio
 }
 
+/* Cruce 1: servicio en UBB Pagos (base de Jamileth): MAC (DHCP) o usuario PPPoE -> id_servicio y estado. */
+$pagos = [];
+$pagosOk = false;
+try {
+    $pass = rtrim((string) @file_get_contents('/etc/ubb/jamileth.pass'), "\r\n");
+    $jam = new PDO('mysql:host=192.168.100.221;port=3306;dbname=ubb_plataforma;charset=utf8mb4', 'equipo_ubb', $pass, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_TIMEOUT => 5,
+    ]);
+    foreach ($jam->query("SELECT UPPER(TRIM(i.mac)) AS mac, LOWER(TRIM(i.pppoe_name)) AS pppoe, i.id_servicio, s.estado
+                          FROM integracion_winbox i
+                          JOIN servicios s ON s.id_servicio = i.id_servicio AND s.id_cliente = i.id_cliente
+                          WHERE UPPER(i.estado_vinculacion) LIKE 'RELACIONADO%'") as $f) {
+        $dato = 'servicio ' . $f['id_servicio'] . ' (' . $f['estado'] . ')';
+        if (!empty($f['mac'])) {
+            $pagos['mac:' . str_replace('-', ':', $f['mac'])] = $dato;
+        }
+        if (!empty($f['pppoe'])) {
+            $pagos['ppp:' . $f['pppoe']] = $dato;
+        }
+    }
+    $pagosOk = true;
+} catch (Throwable $e) {
+    fwrite(STDERR, "Aviso: no se pudo leer UBB Pagos ({$e->getMessage()}); la columna de servicio saldrá vacía.\n");
+}
+
+/* Cruce 2: ¿conectado ahora? DHCP = sesión abierta en radacct; PPPoE = sesión activa en el router. */
+$sesionDhcp = $pdo->prepare('SELECT COUNT(*) FROM radacct WHERE username = ? AND acctstoptime IS NULL');
+$activosPpp = [];
+$routerOk = false;
+try {
+    $router = uispConectarRouter('10.0.1.6');
+    foreach ($router->query(new RouterOS\Query('/ppp/active/print', ['=.proplist=name']))->read() as $a) {
+        if (isset($a['name'])) {
+            $activosPpp[strtolower((string) $a['name'])] = true;
+        }
+    }
+    $routerOk = true;
+} catch (Throwable $e) {
+    fwrite(STDERR, "Aviso: no se pudo leer el router ({$e->getMessage()}); PPPoE saldrá como 'no se sabe'.\n");
+}
+
 $filas = [];
 $cuenta = [];
 foreach ($equipos as $eq) {
@@ -113,27 +154,41 @@ foreach ($equipos as $eq) {
     }
 
     $ligado = $mapa['mac:' . $mac] ?? ($ip !== '' ? ($mapa['ip:' . $ip] ?? null) : null);
+    $conectado = '';
+    $servicio = '';
+    if ($tipo === 'DHCP') {
+        $sesionDhcp->execute([strtoupper($usuario)]);
+        $conectado = (int) $sesionDhcp->fetchColumn() > 0 ? 'sí' : 'no';
+        $servicio = $pagos['mac:' . strtoupper($usuario)] ?? ($pagos['mac:' . $mac] ?? '');
+    } elseif ($tipo === 'PPPoE') {
+        $conectado = $routerOk ? (isset($activosPpp[strtolower($usuario)]) ? 'sí' : 'no') : '?';
+        $servicio = $pagos['ppp:' . strtolower($usuario)] ?? '';
+    }
     if ($tipo === 'SIN RADIUS') {
         $quedaria = 'nada (no está en RADIUS)';
+    } elseif ($servicio !== '') {
+        $quedaria = "CLIENTE en UBB Pagos ($servicio): corregir en UISP, NO cortar";
     } elseif ($ligado !== null) {
         $quedaria = "REVISAR: también ligado al servicio UISP #$ligado";
     } elseif ($actual === RD_LISTA_DEUDORES) {
         $quedaria = 'ya está en CLIENTES-DEUDORES';
+    } elseif ($conectado === 'sí') {
+        $quedaria = 'DUDOSO: conectado y sin servicio en UBB Pagos';
     } elseif ($tipo === 'DHCP') {
-        $quedaria = 'CLIENTES-DEUDORES (efecto inmediato)';
+        $quedaria = 'PENDIENTE real -> CLIENTES-DEUDORES (efecto inmediato)';
     } else {
-        $quedaria = 'CLIENTES-DEUDORES (cuando se encienda RADIUS para PPPoE)';
+        $quedaria = 'PENDIENTE real -> CLIENTES-DEUDORES (cuando se encienda RADIUS para PPPoE)';
     }
-    $clave = $tipo . ' · ' . preg_replace('/ \(.*$|: .*$/', '', $quedaria);
+    $clave = $tipo . ' · ' . preg_replace('/ \(.*$|: .*$| -> .*$/', '', $quedaria);
     $cuenta[$clave] = ($cuenta[$clave] ?? 0) + 1;
-    $filas[] = [$tipo, $nombre, $rol, $ip, $mac, $usuario, $actual, $quedaria];
+    $filas[] = [$tipo, $nombre, $rol, $ip, $mac, $usuario, $actual, $conectado, $servicio, $quedaria];
 }
 
-usort($filas, fn ($a, $b) => [$a[0], $a[7], $a[3]] <=> [$b[0], $b[7], $b[3]]);
+usort($filas, fn ($a, $b) => [$a[0], $a[9], $a[3]] <=> [$b[0], $b[9], $b[3]]);
 
 if ($csv) {
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['tipo', 'equipo', 'rol', 'ip', 'mac', 'usuario_radius', 'lista_o_perfil_actual', 'quedaria']);
+    fputcsv($out, ['tipo', 'equipo', 'rol', 'ip', 'mac', 'usuario_radius', 'lista_o_perfil_actual', 'conectado', 'servicio_ubb_pagos', 'resultado']);
     foreach ($filas as $f) {
         fputcsv($out, $f);
     }
@@ -141,16 +196,16 @@ if ($csv) {
 }
 
 echo "SIMULACIÓN · sitio PENDIENTES · " . date('Y-m-d H:i') . " · no se cambió nada\n";
-echo "Equipos en PENDIENTES: " . count($equipos) . "\n\nResumen:\n";
+echo "Equipos en PENDIENTES: " . count($equipos) . ($pagosOk ? '' : ' · SIN cruce con UBB Pagos') . ($routerOk ? '' : ' · SIN sesiones PPPoE') . "\n\nResumen:\n";
 ksort($cuenta);
 foreach ($cuenta as $k => $n) {
     printf("  %-60s %4d\n", $k, $n);
 }
-echo "\nDetalle (tipo | equipo | IP | actual -> quedaría):\n";
+echo "\nDetalle sin los clientes de UBB Pagos (tipo | equipo | IP | conectado | resultado):\n";
 foreach ($filas as $f) {
-    if ($f[0] === 'SIN RADIUS') {
+    if ($f[0] === 'SIN RADIUS' || $f[8] !== '') {
         continue;
     }
-    printf("  %-6s %-24s %-16s %-26s -> %s\n", $f[0], mb_substr($f[1], 0, 24), $f[3], mb_substr($f[6], 0, 26), $f[7]);
+    printf("  %-6s %-22s %-16s %-3s %s\n", $f[0], mb_substr($f[1], 0, 22), $f[3], $f[7], $f[9]);
 }
 echo "\nLos SIN RADIUS no se muestran (no cambiaría nada). Lista completa: php sync-pendientes.php --csv\n";
