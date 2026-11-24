@@ -8,6 +8,8 @@
  *   php tokens.php ver
  *   php tokens.php crear pruebas <id_servicio>     token que SOLO puede usar ese servicio
  *   php tokens.php crear produccion                token para todos los servicios
+ *   php tokens.php crear lectura [id_servicio...]  token SOLO DE CONSULTA (GET): todos los servicios,
+ *                                                  o solo los que se indiquen; no puede suspender ni reactivar
  *   php tokens.php borrar <nombre>
  *   php tokens.php ip-permitir <ip>
  *   php tokens.php ip-quitar <ip>
@@ -57,7 +59,8 @@ switch ($orden) {
         echo "Tokens:\n";
         foreach ($cfg['tokens'] as $t) {
             echo '  - ' . $t['nombre'] . ' (creado ' . ($t['creado'] ?? '?') . '): '
-                . (is_array($t['servicios'] ?? null) ? 'solo servicio(s) ' . implode(', ', $t['servicios']) : 'todos los servicios') . "\n";
+                . (is_array($t['servicios'] ?? null) ? 'solo servicio(s) ' . implode(', ', $t['servicios']) : 'todos los servicios')
+                . (!empty($t['solo_lectura']) ? ' · SOLO CONSULTA' : '') . "\n";
         }
         if (!$cfg['tokens']) {
             echo "  (ninguno)\n";
@@ -66,10 +69,17 @@ switch ($orden) {
 
     case 'crear':
         $nombre = $argv[2] ?? '';
-        if (!in_array($nombre, ['pruebas', 'produccion'], true)) {
-            fallar('Uso: crear pruebas <id_servicio>   o   crear produccion');
+        if (!in_array($nombre, ['pruebas', 'produccion', 'lectura'], true)) {
+            fallar('Uso: crear pruebas <id_servicio>   |   crear produccion   |   crear lectura [id_servicio...]');
         }
         $servicios = null;
+        if ($nombre === 'lectura') {
+            $ids = array_slice($argv, 3);
+            if (array_filter($ids, fn ($i) => !ctype_digit($i))) {
+                fallar('Los id_servicio deben ser números: crear lectura 1339 1347');
+            }
+            $servicios = $ids === [] ? null : array_map('intval', $ids);
+        }
         if ($nombre === 'pruebas') {
             $ids = array_slice($argv, 3);
             if ($ids === [] || array_filter($ids, fn ($i) => !ctype_digit($i))) {
@@ -83,10 +93,12 @@ switch ($orden) {
             'nombre' => $nombre,
             'sha256' => hash('sha256', $token),
             'servicios' => $servicios,
+            'solo_lectura' => $nombre === 'lectura',
             'creado' => date('Y-m-d H:i'),
         ];
         guardar($cfg);
-        echo "\nToken '$nombre' creado" . ($servicios ? ' (solo servicio ' . implode(', ', $servicios) . ')' : '') . ".\n";
+        echo "\nToken '$nombre' creado" . ($servicios ? ' (solo servicio ' . implode(', ', $servicios) . ')' : '')
+            . ($nombre === 'lectura' ? ' · SOLO CONSULTA: no puede suspender ni reactivar' : '') . ".\n";
         echo "Cópialo AHORA; no se vuelve a mostrar (si se pierde, se crea otro):\n\n  $token\n\n";
         echo "Entrégalo por un medio privado, no por chat ni correo. Si ya existía uno '$nombre', quedó reemplazado.\n";
         break;
