@@ -36,9 +36,12 @@ function ppVelocidad(string $maxLimit): string
     return implode('/', $partes);
 }
 
-const PP_RED_INICIO = '10.2.0.2';
-const PP_RED_FIN = '10.2.3.254';
+/* Bloques /22 de PPPoE habilitados en el router, en orden de uso (10.2.0.0/22 = 10.2.0.1 a 10.2.3.254).
+   Cuando se acabe el primero sigue 10.2.4.0/22; para usarlo el ingeniero debe agregarlo al router
+   (pool, ruta, colas) y aquí se añade a la lista. */
+const PP_BLOQUES = ['10.2.0.0'];
 const PP_GATEWAY = '10.2.0.1';
+const PP_MODELOS = ['TP5', 'TP4', 'TPX', 'TPC', 'TPE', 'UAC'];
 
 /** Perfiles que se pueden asignar en una alta (los de clientes; nunca los de prueba). */
 function ppPerfilesAlta(array $perfiles): array
@@ -46,18 +49,55 @@ function ppPerfilesAlta(array $perfiles): array
     return array_values(array_filter(array_keys($perfiles), fn ($p) => stripos($p, 'pro-pppoe') === 0));
 }
 
-/** Primera IP libre de la red PPPoE (sin .0, .255 ni el gateway) que no use nadie en el router ni en RADIUS. */
+/** Bloque /22 habilitado al que pertenece la IP (número de red), o null. */
+function ppBloqueDe(int $n): ?int
+{
+    foreach (PP_BLOQUES as $b) {
+        $red = ip2long($b);
+        if ($n >= $red && $n <= $red + 1023) {
+            return $red;
+        }
+    }
+    return null;
+}
+
+/** IP que no se puede usar nunca: red y broadcast del /22, y el gateway. (Las .0 y .255 de en medio sí sirven.) */
+function ppIpReservada(int $n): bool
+{
+    $red = ppBloqueDe($n);
+    return $red === null || $n === $red || $n === $red + 1023 || $n === ip2long(PP_GATEWAY);
+}
+
+/**
+ * Regla de asignación: las IPs se dan de arriba hacia abajo. La siguiente es la que está justo debajo
+ * de la más baja ya usada en el bloque (ej. si la última fue 10.2.1.39, sigue 10.2.1.38), saltando las
+ * ocupadas. Cuando el bloque se acaba, se pasa al siguiente bloque habilitado empezando por arriba.
+ */
 function ppIpLibre(array $usadas): string
 {
-    for ($n = ip2long(PP_RED_INICIO); $n <= ip2long(PP_RED_FIN); $n++) {
-        $ip = long2ip($n);
-        $ultimo = $n & 255;
-        if ($ultimo === 0 || $ultimo === 255 || $ip === PP_GATEWAY || isset($usadas[$ip])) {
-            continue;
+    foreach (PP_BLOQUES as $b) {
+        $red = ip2long($b);
+        $tope = $red + 1022;
+        $minima = null;
+        foreach (array_keys($usadas) as $ip) {
+            $n = ip2long((string) $ip);
+            if ($n !== false && $n > $red && $n <= $tope && $n !== ip2long(PP_GATEWAY)) {
+                $minima = $minima === null ? $n : min($minima, $n);
+            }
         }
-        return $ip;
+        for ($n = $minima === null ? $tope : $minima - 1; $n > $red; $n--) {
+            if (!ppIpReservada($n) && !isset($usadas[long2ip($n)])) {
+                return long2ip($n);
+            }
+        }
     }
     return '';
+}
+
+/** Siguiente bloque /22 que habría que habilitar en el router cuando se acaben los actuales. */
+function ppSiguienteBloque(): string
+{
+    return long2ip(ip2long(PP_BLOQUES[count(PP_BLOQUES) - 1]) + 1024) . '/22';
 }
 
 /** Revisa una IP escrita a mano. Devuelve null si se puede usar, o el motivo en palabras. */
@@ -67,16 +107,26 @@ function ppRevisarIp(string $ip, array $usadas): ?string
         return 'No es una IP válida.';
     }
     $n = ip2long($ip);
-    if ($n < ip2long(PP_RED_INICIO) - 2 || $n > ip2long(PP_RED_FIN) + 1) {
-        return 'Está fuera de la red PPPoE (10.2.0.0 a 10.2.3.255).';
+    if (ppBloqueDe($n) === null) {
+        return 'Está fuera de la red PPPoE habilitada (' . implode(', ', array_map(fn ($b) => $b . '/22', PP_BLOQUES)) . ').';
     }
-    if (($n & 255) === 0 || ($n & 255) === 255 || $ip === PP_GATEWAY) {
-        return 'No se puede usar: terminada en .0 o .255, o es el gateway 10.2.0.1.';
+    if (ppIpReservada($n)) {
+        return 'No se puede usar: es la dirección de red, la de broadcast o el gateway ' . PP_GATEWAY . '.';
     }
     if (isset($usadas[$ip])) {
         return 'Ya la usa ' . $usadas[$ip] . '.';
     }
     return null;
+}
+
+/** Usuario según la regla: UBB- + modelo (3) + últimos 5 caracteres de la MAC LAN. Ej. TP5 + ..:0E:5D:C8 -> UBB-TP5E5DC8 */
+function ppUsuarioDesdeMac(string $modelo, string $mac): ?string
+{
+    $hex = strtoupper(preg_replace('/[^0-9A-Fa-f]/', '', $mac));
+    if (!in_array($modelo, PP_MODELOS, true) || strlen($hex) !== 12) {
+        return null;
+    }
+    return 'UBB-' . $modelo . substr($hex, -5);
 }
 
 /** Contraseña fácil de dictar: 10 caracteres sin letras/números que se confunden. */
@@ -248,7 +298,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
         if (!$routerOkPp || !($pdoPp instanceof PDO)) {
             throw new RuntimeException('Sin conexión con el router o con RADIUS: no se puede revisar que el usuario y la IP estén libres.');
         }
-        $usuario = trim((string) ($_POST['usuario'] ?? ''));
+        $usuario = ppUsuarioDesdeMac((string) ($_POST['modelo'] ?? ''), (string) ($_POST['mac'] ?? ''));
+        if ($usuario === null) {
+            throw new RuntimeException('Elige el modelo del módem y escribe su MAC LAN completa (12 caracteres, ej. 98:25:4A:EF:AA:8F).');
+        }
         $perfil = (string) ($_POST['perfil'] ?? '');
         $pass = trim((string) ($_POST['pass'] ?? ''));
         $generada = false;
@@ -277,7 +330,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
         if ($ip === '') {
             $ip = ppIpLibre($ipsUsadasPp);
             if ($ip === '') {
-                throw new RuntimeException('No quedan IPs libres en la red PPPoE 10.2.0.0/22.');
+                throw new RuntimeException('Se acabaron las IPs del bloque PPPoE. El ingeniero debe habilitar el siguiente bloque ('
+                    . ppSiguienteBloque() . ') en el router antes de dar más altas.');
             }
         } elseif (($motivoIp = ppRevisarIp($ip, $ipsUsadasPp)) !== null) {
             // Se revisa otra vez al guardar con los datos del momento, no solo en la pantalla.
@@ -334,10 +388,14 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     <details class="caja plegable" <?= ($flashPpError !== '' || $soloRadiusPp !== []) ? 'open' : '' ?>>
         <summary>Dar de alta una cuenta PPPoE nueva en RADIUS</summary>
         <p class="sub" style="margin:0 0 12px">Solo crea cuentas nuevas; no cambia ninguna existente. Revisa que el usuario no exista
-            en el router ni en RADIUS y le asigna la siguiente IP libre de 10.2.0.0/22, que será siempre la misma.
+            en el router ni en RADIUS. El usuario se arma solo: <b>UBB-</b> + modelo + últimos 5 de la MAC LAN.
+            La IP sigue la regla de asignación: la que está justo debajo de la última dada (de arriba hacia abajo), y será siempre la misma.
             Mientras RADIUS para PPPoE no esté encendido en el router, la cuenta queda lista pero no se usa.</p>
         <?php if (!$routerOkPp): ?>
             <div class="aviso">Sin conexión con el router: no se puede dar de alta ahora.</div>
+        <?php elseif ($ipSugeridaPp === ''): ?>
+            <div class="error">Se acabaron las IPs del bloque PPPoE. El ingeniero debe habilitar el siguiente bloque
+                (<?= escapar(ppSiguienteBloque()) ?>) en el router antes de dar más altas.</div>
         <?php else: ?>
         <form class="alta" method="post" action="?modulo=radius-pppoe"
               data-confirmar="¿Dar de alta esta cuenta PPPoE en RADIUS?"
@@ -346,8 +404,20 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <input type="hidden" name="csrf_radius_pppoe" value="<?= escapar($csrfPp) ?>">
             <input type="hidden" name="accion" value="alta_pppoe">
             <div>
-                <label for="pp-usuario">Usuario</label>
-                <input id="pp-usuario" name="usuario" placeholder="UBB-TP123456" required autocomplete="off" aria-describedby="pp-usuario-msg">
+                <label for="pp-modelo">Modelo del módem</label>
+                <select id="pp-modelo" name="modelo" required>
+                    <option value="">Elige…</option>
+                    <?php foreach (PP_MODELOS as $m): ?><option value="<?= escapar($m) ?>"><?= escapar($m) ?></option><?php endforeach; ?>
+                </select>
+            </div>
+            <div>
+                <label for="pp-mac">MAC LAN del módem</label>
+                <input id="pp-mac" name="mac" class="mono" placeholder="98:25:4A:EF:AA:8F" required autocomplete="off" aria-describedby="pp-mac-msg">
+                <small class="campo-msg" id="pp-mac-msg" aria-live="polite"></small>
+            </div>
+            <div>
+                <label for="pp-usuario">Usuario (se arma solo)</label>
+                <input id="pp-usuario" class="mono" readonly tabindex="-1" placeholder="UBB-TP5E5DC8" aria-describedby="pp-usuario-msg">
                 <small class="campo-msg" id="pp-usuario-msg" aria-live="polite"></small>
             </div>
             <div>
@@ -364,13 +434,16 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <div>
                 <label for="pp-ip">IP fija</label>
                 <input id="pp-ip" name="ip" value="<?= escapar($ipSugeridaPp) ?>" class="mono" inputmode="decimal" autocomplete="off"
-                       placeholder="vacía = la siguiente libre" aria-describedby="pp-ip-msg">
+                       placeholder="vacía = la siguiente según la regla" aria-describedby="pp-ip-msg">
                 <small class="campo-msg" id="pp-ip-msg" aria-live="polite"></small>
             </div>
             <button class="b-alta" type="submit" id="pp-guardar">Dar de alta</button>
         </form>
         <script type="application/json" id="pp-ocupados"><?= json_encode([
             'ips' => $ipsUsadasPp,
+            'bloques' => PP_BLOQUES,
+            'gateway' => PP_GATEWAY,
+            'sugerida' => $ipSugeridaPp,
             'usuarios' => array_values(array_unique(array_merge(array_keys($secretsPp), array_keys($enRadiusPp)))),
         ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE) ?></script>
         <?php endif; ?>
@@ -488,25 +561,36 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     if (!datos) return;
     var ocupados = JSON.parse(datos.textContent), usuarios = {};
     ocupados.usuarios.forEach(function (u) { usuarios[String(u).toLowerCase()] = true; });
-    var u = document.getElementById('pp-usuario'), ip = document.getElementById('pp-ip'), boton = document.getElementById('pp-guardar');
+    var u = document.getElementById('pp-usuario'), ip = document.getElementById('pp-ip'), boton = document.getElementById('pp-guardar'),
+        modelo = document.getElementById('pp-modelo'), mac = document.getElementById('pp-mac');
     function num(t) {
         var p = t.split('.');
         if (p.length !== 4) return null;
         for (var i = 0; i < 4; i++) { if (!/^\d{1,3}$/.test(p[i]) || +p[i] > 255) return null; }
         return ((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3];
     }
-    function revisarUsuario(v) {
-        if (v === '') return '';
-        if (!/^[A-Za-z0-9._@-]{3,64}$/.test(v)) return 'Usuario no válido: 3 a 64 caracteres, solo letras, números y . _ @ -';
-        if (usuarios[v.toLowerCase()]) return 'Ese usuario ya existe (en el router o en RADIUS).';
+    function hexMac() { return mac.value.replace(/[^0-9A-Fa-f]/g, '').toUpperCase(); }
+    function revisarMac() {
+        var h = hexMac();
+        if (mac.value.trim() === '') return '';
+        if (h.length !== 12) return 'La MAC debe tener 12 caracteres (ej. 98:25:4A:EF:AA:8F). Van ' + h.length + '.';
+        return null;
+    }
+    function revisarUsuario() {
+        var h = hexMac();
+        u.value = (modelo.value && h.length === 12) ? 'UBB-' + modelo.value + h.slice(-5) : '';
+        if (u.value === '') return modelo.value ? '' : (h.length === 12 ? 'Elige el modelo del módem.' : '');
+        if (usuarios[u.value.toLowerCase()]) return 'Ese usuario ya existe (en el router o en RADIUS).';
         return null;
     }
     function revisarIp(v) {
         if (v === '') return null;
         var n = num(v);
         if (n === null) return 'No es una IP válida.';
-        if (n < num('10.2.0.0') || n > num('10.2.3.255')) return 'Está fuera de la red PPPoE (10.2.0.0 a 10.2.3.255).';
-        if (n % 256 === 0 || n % 256 === 255 || v === '10.2.0.1') return 'No se puede usar: terminada en .0 o .255, o es el gateway 10.2.0.1.';
+        var red = null;
+        ocupados.bloques.forEach(function (b) { var r = num(b); if (n >= r && n <= r + 1023) red = r; });
+        if (red === null) return 'Está fuera de la red PPPoE habilitada (' + ocupados.bloques.map(function (b) { return b + '/22'; }).join(', ') + ').';
+        if (n === red || n === red + 1023 || v === ocupados.gateway) return 'No se puede usar: es la dirección de red, la de broadcast o el gateway ' + ocupados.gateway + '.';
         if (ocupados.ips[v]) return 'Ya la usa ' + ocupados.ips[v] + '.';
         return null;
     }
@@ -519,11 +603,15 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         return !msg;
     }
     function revisar() {
-        var a = pintar(u, revisarUsuario(u.value.trim()), 'Disponible');
-        var b = pintar(ip, revisarIp(ip.value.trim()), ip.value.trim() === '' ? 'Se usará la siguiente libre' : 'IP libre');
-        boton.disabled = !(a && b) || u.value.trim() === '';
+        var c = pintar(mac, revisarMac(), 'MAC completa');
+        var a = pintar(u, revisarUsuario(), 'Disponible');
+        var v = ip.value.trim();
+        var b = pintar(ip, revisarIp(v), v === '' ? 'Se usará la siguiente según la regla (' + ocupados.sugerida + ')'
+            : (v === ocupados.sugerida ? 'IP libre · la siguiente según la regla' : 'IP libre · ojo: no es la que sigue en la regla (' + ocupados.sugerida + ')'));
+        boton.disabled = !(a && b && c) || u.value === '';
     }
-    u.addEventListener('input', revisar);
+    modelo.addEventListener('change', revisar);
+    mac.addEventListener('input', revisar);
     ip.addEventListener('input', revisar);
     revisar();
 })();
