@@ -108,6 +108,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             $pdoRd->commit();
             $_SESSION['flash_radius_dhcp_ok'] = "Alta lista: $mac recibirá siempre la IP $ip ("
                 . $cfgRd['lista'] . '). Al conectarse o renovar, el router le dará esa IP.';
+        } elseif ($accion === 'pasar_radius') {
+            // Acción delicada: además de la confirmación pide la clave de acciones.
+            $bloqueo = (int) ($_SESSION['clave_rd_bloqueo'] ?? 0);
+            if ($bloqueo > time()) {
+                throw new RuntimeException('Demasiados intentos con clave incorrecta. Espera ' . (int) ceil(($bloqueo - time()) / 60) . ' min.');
+            }
+            if (!rdClaveConfigurada()) {
+                throw new RuntimeException('Falta configurar la clave de acciones en el servidor.');
+            }
+            if (!rdVerificarClave((string) ($_POST['clave'] ?? ''))) {
+                $fallos = (int) ($_SESSION['clave_rd_fallos'] ?? 0) + 1;
+                $_SESSION['clave_rd_fallos'] = $fallos;
+                error_log('UBB RADIUS DHCP: clave de acciones incorrecta (' . $fallos . ') desde ' . ($_SERVER['REMOTE_ADDR'] ?? '?'));
+                if ($fallos >= 5) {
+                    $_SESSION['clave_rd_bloqueo'] = time() + 600;
+                    $_SESSION['clave_rd_fallos'] = 0;
+                }
+                throw new RuntimeException('Clave incorrecta. No se cambió nada.');
+            }
+            $_SESSION['clave_rd_fallos'] = 0;
+            $configRouter = $mikrotikConfig;
+            $configRouter['host'] = $cfgRd['router'];
+            $router = crearClienteMikrotik($configRouter);
+            $_SESSION['flash_radius_dhcp_ok'] = rdPasarARadius($pdoRd, $router, $cfgRd, $mac, rdPlanesDisponibles($router, $vlanRd));
         } elseif ($accion === 'suspender' || $accion === 'reactivar') {
             if (!$tablaSuspensionesRd) {
                 throw new RuntimeException('Falta la tabla radius.ubb_suspensiones. Créala antes de suspender.');
@@ -224,14 +248,27 @@ if ($pdoRd instanceof PDO) {
 
 $planesRd = [];
 $errorPlanesRd = '';
+$fijasRd = [];
+$errorFijasRd = '';
 try {
     $configPlanesRd = $mikrotikConfig;
     $configPlanesRd['host'] = $cfgRd['router'];
-    $planesRd = rdPlanesDisponibles(crearClienteMikrotik($configPlanesRd), $vlanRd);
+    $routerVistaRd = crearClienteMikrotik($configPlanesRd);
+    $planesRd = rdPlanesDisponibles($routerVistaRd, $vlanRd);
+    try {
+        foreach (rdConcesionesFijas($routerVistaRd, $cfgRd['servidor']) as $f) {
+            $f += ($pdoRd instanceof PDO) ? rdRevisarFija($pdoRd, $cfgRd, $f, $planesRd) : ['plan' => $cfgRd['lista'], 'problema' => 'Sin base RADIUS.'];
+            $fijasRd[] = $f;
+        }
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS DHCP: sin concesiones fijas: ' . $e->getMessage());
+        $errorFijasRd = 'No se pudo revisar si hay concesiones fijas fuera de RADIUS.';
+    }
 } catch (Throwable $e) {
     error_log('UBB RADIUS DHCP: sin planes del router: ' . $e->getMessage());
     $errorPlanesRd = 'No se pudo consultar los planes en el router; el cambio de plan no está disponible.';
 }
+$claveListaRd = rdClaveConfigurada();
 
 /* Conteo general de servicios DHCP en RADIUS (todas las VLAN) */
 $globalRd = ['total' => 0, 'suspendidos' => 0, 'enLinea' => 0, 'porVlan' => [], 'porPlan' => []];
@@ -464,6 +501,56 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
         </table>
         </div>
     </section>
+
+    <?php $fijasListasRd = count(array_filter($fijasRd, fn ($f) => $f['problema'] === null)); ?>
+    <?php if ($fijasRd !== [] || $errorFijasRd !== ''): ?>
+    <details class="caja plegable" <?= $fijasRd !== [] ? 'open' : '' ?>>
+        <summary>Concesiones fijas fuera de RADIUS en la VLAN <?= escapar($vlanRd) ?> <small>(<?= count($fijasRd) ?>)</small></summary>
+        <?php if ($errorFijasRd !== ''): ?>
+            <p class="tenue"><?= escapar($errorFijasRd) ?></p>
+        <?php else: ?>
+            <p class="sub" style="margin:0 0 12px">Estos equipos tienen IP fija hecha a mano en el router: tienen internet, pero no pasan por RADIUS,
+                así que el panel y UISP no pueden suspenderlos. «Pasar a RADIUS» los da de alta con su misma IP y plan y quita la concesión fija.
+                <?php if ($fijasListasRd > 0): ?>Pide confirmación y la clave de acciones.<?php endif; ?></p>
+            <?php if (!$claveListaRd): ?>
+                <div class="aviso">Falta configurar la clave de acciones en el servidor; mientras tanto el botón no está disponible.</div>
+            <?php endif; ?>
+            <div class="tabla">
+            <table>
+                <thead><tr><th>IP</th><th>MAC</th><th>Equipo / comentario</th><th>Plan</th><th></th></tr></thead>
+                <tbody>
+                <?php foreach ($fijasRd as $f): ?>
+                    <tr>
+                        <td data-t="IP" class="mono"><b><?= escapar($f['ip']) ?></b></td>
+                        <td data-t="MAC" class="mono"><?= escapar($f['mac']) ?></td>
+                        <td data-t="Equipo"><?= escapar($f['equipo'] !== '' ? $f['equipo'] : '—') ?>
+                            <?php if ($f['comentario'] !== ''): ?><small class="bloque"><?= escapar($f['comentario']) ?></small><?php endif; ?></td>
+                        <td data-t="Plan"><span class="pill plan"><?= escapar($f['plan']) ?></span></td>
+                        <td>
+                            <?php if ($f['problema'] !== null): ?>
+                                <small class="bloque" style="color:var(--red)"><?= escapar($f['problema']) ?></small>
+                            <?php elseif ($claveListaRd): ?>
+                                <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
+                                      data-confirmar="¿Pasar <?= escapar($f['ip']) ?> a RADIUS?"
+                                      data-detalle="Se da de alta con la IP <?= escapar($f['ip']) ?> y el plan <?= escapar($f['plan']) ?>, y se quita su concesión fija del router. No pierde internet. MAC <?= escapar($f['mac']) ?>."
+                                      data-verbo="Pasar a RADIUS"
+                                      data-pedir-clave="1">
+                                    <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
+                                    <input type="hidden" name="accion" value="pasar_radius">
+                                    <input type="hidden" name="mac" value="<?= escapar($f['mac']) ?>">
+                                    <input type="hidden" name="clave" value="">
+                                    <button class="b-alta" type="submit">Pasar a RADIUS</button>
+                                </form>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+            </div>
+        <?php endif; ?>
+    </details>
+    <?php endif; ?>
 
     <details class="caja plegable">
         <summary>Dar de alta un cliente en la VLAN <?= escapar($vlanRd) ?></summary>

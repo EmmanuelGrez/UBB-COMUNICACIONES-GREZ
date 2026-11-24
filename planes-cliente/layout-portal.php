@@ -207,6 +207,8 @@ dialog.confirmar::backdrop{background:rgba(41,36,53,.45)}
 dialog.confirmar h2{margin:0 0 8px;font-size:18px;font-weight:600;color:var(--plum);line-height:1.3}
 dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
 .dlg-acciones{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.dlg-clave{display:block;margin:0 0 16px;font-size:13px;font-weight:600;color:var(--plum-2)}
+.dlg-clave input{display:block;width:100%;margin-top:6px}
 @media(max-width:760px){.buscador{width:100%;flex-wrap:wrap}.buscador span{width:100%}}
 /* Celular y tabletas */
 @media(max-width:1000px){.resumen{grid-template-columns:repeat(2,minmax(0,1fr))}.general .g-planes{margin-left:0;width:100%}}
@@ -256,8 +258,11 @@ function portalFin(): void
     <form method="dialog">
         <h2 id="dlg-titulo"></h2>
         <p id="dlg-texto"></p>
+        <label class="dlg-clave" id="dlg-clave-campo" hidden>Clave de acciones
+            <input type="password" id="dlg-clave" autocomplete="off">
+        </label>
         <div class="dlg-acciones">
-            <button class="b-sec" value="cancelar" autofocus>Cancelar</button>
+            <button class="b-sec" value="cancelar" formnovalidate autofocus>Cancelar</button>
             <button id="dlg-ok" value="ok"></button>
         </div>
     </form>
@@ -278,12 +283,23 @@ function portalFin(): void
         document.getElementById('dlg-texto').textContent = f.dataset.detalle || '';
         ok.textContent = f.dataset.verbo || 'Confirmar';
         ok.className = f.dataset.tono === 'peligro' ? 'b-susp' : (f.dataset.tono === 'bien' ? 'b-react' : 'b-plan');
+        var pideClave = !!f.dataset.pedirClave, campo = document.getElementById('dlg-clave-campo'), clave = document.getElementById('dlg-clave');
+        campo.hidden = !pideClave;
+        clave.required = pideClave;
+        clave.value = '';
         dlg.returnValue = '';
         dlg.showModal();
+        if (pideClave) clave.focus();
     });
     dlg.addEventListener('close', function () {
         var p = pendiente; pendiente = null;
         if (!p) return;
+        var clave = document.getElementById('dlg-clave');
+        if (dlg.returnValue === 'ok' && p.form.dataset.pedirClave) {
+            var destino = p.form.querySelector('input[name="clave"]');
+            if (destino) destino.value = clave.value;
+        }
+        clave.value = '';
         if (dlg.returnValue === 'ok') {
             p.form.dataset.confirmado = '1';
             if (p.boton && p.form.requestSubmit) p.form.requestSubmit(p.boton); else p.form.submit();
