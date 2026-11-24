@@ -11,7 +11,7 @@ session_start();
 
 date_default_timezone_set('America/Mexico_City');
 
-$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'radius-dhcp', 'radius-pppoe'];
+$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'solicitudes', 'historial', 'radius-dhcp', 'radius-pppoe', 'bitacora'];
 $moduloActual = (string) ($_GET['modulo'] ?? 'inicio');
 if (!in_array($moduloActual, $modulosPermitidos, true)) {
     $moduloActual = 'inicio';
@@ -621,6 +621,12 @@ function obtenerMapaIntegracionDhcp(PDO $pdoJamileth): array
 /* CLIENTES DHCP EN RADIUS: alta, suspension y reactivacion (modulo aparte). */
 if ($moduloActual === 'radius-dhcp') {
     require __DIR__ . '/modulo-radius-dhcp.php';
+    exit;
+}
+
+/* BITÁCORA: historial de cambios y de llamadas a la API (solo consulta). */
+if ($moduloActual === 'bitacora') {
+    require __DIR__ . '/modulo-bitacora.php';
     exit;
 }
 

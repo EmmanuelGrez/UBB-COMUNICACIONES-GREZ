@@ -85,6 +85,7 @@ function portalMenu(string $moduloActual, array $estado = []): string
         . '<div class="nav-group"><span class="nav-group-label">Monitoreo y control</span>'
         . portalEnlace('radius-dhcp', $moduloActual, '⇄', 'Clientes DHCP RADIUS')
         . portalEnlace('radius-pppoe', $moduloActual, '⇆', 'Clientes PPPoE RADIUS')
+        . portalEnlace('bitacora', $moduloActual, '☰', 'Bitácora')
         . portalEnlace('historial', $moduloActual === 'solicitudes' ? 'historial' : $moduloActual, '◷', 'Gestión de cambios') . '</div>'
         . '</nav>';
     if ($estado !== []) {
