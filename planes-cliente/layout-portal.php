@@ -108,6 +108,9 @@ function portalInicio(string $titulo, string $subtitulo, string $moduloActual): 
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <title><?= htmlspecialchars($titulo, ENT_QUOTES) ?> | UBB Comunicaciones</title>
     <style>
 :root{
@@ -128,7 +131,7 @@ a{color:var(--plum-3)}
 /* Bloques */
 .caja{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:16px;box-shadow:var(--shadow)}
 .general{display:flex;flex-wrap:wrap;gap:24px;align-items:center;background:var(--plum);color:#fff;border-radius:var(--radius);padding:18px 24px;margin-bottom:16px}
-.general b{display:block;font-size:24px;line-height:1.2}
+.general b{display:block;font-size:24px;line-height:1.2;font-variant-numeric:tabular-nums}
 .general span{font-size:12.5px;color:#e3ddef}
 .general .g-total b{font-size:34px}
 .general .g-total{padding-right:24px;border-right:1px solid rgba(255,255,255,.22)}
@@ -142,7 +145,7 @@ a{color:var(--plum-3)}
 .tab.activo small{background:rgba(255,255,255,.22);color:#fff}
 .resumen{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:16px}
 .tarjeta{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-sm);padding:14px 16px;box-shadow:var(--shadow)}
-.tarjeta b{display:block;font-size:24px;color:var(--plum)}
+.tarjeta b{display:block;font-size:24px;color:var(--plum);font-variant-numeric:tabular-nums}
 .tarjeta span{font-size:12px;color:var(--muted)}
 .mensaje,.error,.aviso,.fase{padding:12px 16px;border-radius:12px;margin-bottom:14px;font-size:14px;border:1px solid var(--line);border-left:4px solid var(--plum-3);background:var(--surface)}
 .mensaje{border-left-color:var(--green);background:var(--green-soft);color:#185b31}
@@ -157,11 +160,11 @@ input,select{padding:9px 11px;border:1px solid var(--line-strong);border-radius:
 input:focus,select:focus{outline:2px solid var(--lavender);outline-offset:1px}
 /* Tablas */
 .tabla{overflow-x:auto}
-table{width:100%;border-collapse:collapse;font-size:14px}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
 th,td{padding:11px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
 th{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);background:var(--surface);position:sticky;top:0;z-index:1}
 tbody tr:hover{background:var(--surface-soft)}
-.mono{font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:13.5px}
+.mono{font-family:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;font-size:13px}
 .tenue{color:#958ea3}
 small.bloque{display:block;margin-top:3px;color:var(--muted);font-size:12px}
 td small{color:var(--muted)}
@@ -193,7 +196,7 @@ form.inline{margin:0;display:flex;gap:6px;align-items:center}
 /* Formularios y plegables */
 .alta{display:grid;grid-template-columns:1fr 1fr auto;gap:12px;align-items:end}
 label{display:block;font-size:12px;font-weight:600;margin-bottom:6px;color:var(--plum-2)}
-.alta input{width:100%;font-family:ui-monospace,Consolas,monospace}
+.alta input{width:100%;font-family:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace}
 details.plegable summary{cursor:pointer;font-weight:600;color:var(--plum-2);font-size:15px;list-style-position:inside}
 details.plegable[open] summary{margin-bottom:14px}
 table.historial{font-size:12.5px}
