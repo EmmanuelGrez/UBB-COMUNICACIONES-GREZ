@@ -14,6 +14,7 @@
  *   docker exec -it servidor-aviso php /var/www/html/planes-cliente/uisp-puente.php
  *   ... uisp-puente.php --explorar       (campos de servicios y motivos de suspensión)
  *   ... uisp-puente.php --explorar-nms   (camino servicio -> sitio -> equipo -> IP; requiere token NMS)
+ *   ... uisp-puente.php --explorar-sitio=ID   (cuántos equipos tiene un sitio del NMS, ej. PENDIENTES; solo conteos)
  */
 
 use RouterOS\Client;
@@ -328,6 +329,40 @@ if (in_array('--explorar-nms', $argv ?? [], true)) {
     }
     if ($probados === 0) {
         echo "Ninguno de esos 10 servicios tiene sitio enlazado.\n";
+    }
+}
+/* --explorar-sitio=ID: cuántos equipos tiene un sitio del NMS (ej. PENDIENTES) y si caben en una consulta.
+   Solo muestra conteos y tamaños, sin nombres ni datos de clientes. */
+foreach ($argv ?? [] as $arg) {
+    if (!preg_match('/^--explorar-sitio=([0-9a-fA-F-]{8,64})$/', $arg, $m)) {
+        continue;
+    }
+    echo "\n--- Explorar sitio {$m[1]} (solo consulta) ---\n";
+    $s = uispPorRouter($router, 'GET', '/sites/' . $m[1], null, 'nms');
+    echo "Sitio: " . ($s['ok'] ? strlen($s['datos']) . ' bytes' : "falló -> {$s['error']}") . "\n";
+    if ($s['ok']) {
+        $sitio = (array) json_decode($s['datos'], true);
+        echo "   nombre: " . ($sitio['identification']['name'] ?? '?') . ", tipo: " . ($sitio['identification']['type'] ?? '?') . "\n";
+    }
+    foreach (['', '&role=station', '&role=router', '&type=onu'] as $filtro) {
+        $d = uispPorRouter($router, 'GET', '/devices?siteId=' . rawurlencode($m[1]) . $filtro, null, 'nms');
+        echo "Equipos" . ($filtro === '' ? '' : " ($filtro)") . ": ";
+        if (!$d['ok']) {
+            echo "falló -> {$d['error']}\n";
+            continue;
+        }
+        $equipos = (array) json_decode($d['datos'], true);
+        $porRol = [];
+        $red = ['10.2 (PPPoE)' => 0, 'otra IP' => 0, 'sin IP' => 0];
+        foreach ($equipos as $eq) {
+            $rol = (string) ($eq['identification']['role'] ?? '?');
+            $porRol[$rol] = ($porRol[$rol] ?? 0) + 1;
+            $ip = (string) preg_replace('#/\d+$#', '', (string) ($eq['ipAddress'] ?? ''));
+            $red[$ip === '' ? 'sin IP' : (strpos($ip, '10.2.') === 0 ? '10.2 (PPPoE)' : 'otra IP')]++;
+        }
+        echo count($equipos) . " (" . strlen($d['datos']) . " bytes)"
+            . (strlen($d['datos']) >= 64000 ? " ⚠ llegó al límite de 64 KB: puede estar incompleto" : '') . "\n";
+        echo "   por rol: " . json_encode($porRol) . "\n   por IP: " . json_encode($red) . "\n";
     }
 }
 echo "Listo. No se cambió nada.\n";
