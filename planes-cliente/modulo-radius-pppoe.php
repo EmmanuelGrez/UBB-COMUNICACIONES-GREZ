@@ -69,17 +69,20 @@ function ppIpReservada(int $n): bool
 }
 
 /**
+ * $usadas: todas las IPs ocupadas (nunca se sugieren). $regla: solo las fijas de cuentas reales; la más
+ * baja de estas marca dónde va la regla (las pruebas y las sesiones dinámicas no la mueven).
  * Regla de asignación: las IPs se dan de arriba hacia abajo. La siguiente es la que está justo debajo
  * de la más baja ya usada en el bloque (ej. si la última fue 10.2.1.39, sigue 10.2.1.38), saltando las
  * ocupadas. Cuando el bloque se acaba, se pasa al siguiente bloque habilitado empezando por arriba.
  */
-function ppIpLibre(array $usadas): string
+function ppIpLibre(array $usadas, ?array $regla = null): string
 {
+    $regla ??= $usadas;
     foreach (PP_BLOQUES as $b) {
         $red = ip2long($b);
         $tope = $red + 1022;
         $minima = null;
-        foreach (array_keys($usadas) as $ip) {
+        foreach (array_keys($regla) as $ip) {
             $n = ip2long((string) $ip);
             if ($n !== false && $n > $red && $n <= $tope && $n !== ip2long(PP_GATEWAY)) {
                 $minima = $minima === null ? $n : min($minima, $n);
@@ -92,6 +95,12 @@ function ppIpLibre(array $usadas): string
         }
     }
     return '';
+}
+
+/** Cuentas de prueba (PRUEBA-...): apartan su IP pero no mueven la regla de asignación. */
+function ppEsPrueba(string $usuario): bool
+{
+    return stripos($usuario, 'PRUEBA') === 0;
 }
 
 /** Siguiente bloque /22 que habría que habilitar en el router cuando se acaben los actuales. */
@@ -158,6 +167,7 @@ $clientesPp = [];
 $enRadiusPp = [];
 $perfilesPp = [];
 $ipsUsadasPp = [];
+$ipsReglaPp = []; // IPs fijas de cuentas reales (no pruebas, no sesiones dinámicas): marcan dónde va la regla
 $secretsPp = [];
 $soloRadiusPp = [];
 $routerOkPp = false;
@@ -227,6 +237,9 @@ try {
         $secretsPp[strtolower($usuario)] = true;
         if ($ip !== '') {
             $ipsUsadasPp[$ip] = $usuario . ' (cuenta del router)';
+            if (!ppEsPrueba($usuario)) {
+                $ipsReglaPp[$ip] = true;
+            }
         }
         $activo = $activos[strtolower($usuario)] ?? null;
         $clientesPp[] = [
@@ -277,6 +290,9 @@ if ($pdoPp instanceof PDO) {
                              WHERE ip.attribute = 'Framed-IP-Address' AND ip.value LIKE '10.2.%'");
         foreach ($st->fetchAll() as $f) {
             $ipsUsadasPp[(string) $f['ip']] = (string) $f['username'] . ' (RADIUS)';
+            if (!ppEsPrueba((string) $f['username'])) {
+                $ipsReglaPp[(string) $f['ip']] = true;
+            }
             if (!isset($secretsPp[strtolower((string) $f['username'])])) {
                 $soloRadiusPp[] = $f;
             }
@@ -287,7 +303,7 @@ if ($pdoPp instanceof PDO) {
     }
 }
 $perfilesAltaPp = ppPerfilesAlta($perfilesPp);
-$ipSugeridaPp = ppIpLibre($ipsUsadasPp);
+$ipSugeridaPp = ppIpLibre($ipsUsadasPp, $ipsReglaPp);
 
 /* ---------- Alta de una cuenta PPPoE nueva en RADIUS ---------- */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_pppoe') {
@@ -328,7 +344,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
         }
         $ip = trim((string) ($_POST['ip'] ?? ''));
         if ($ip === '') {
-            $ip = ppIpLibre($ipsUsadasPp);
+            $ip = ppIpLibre($ipsUsadasPp, $ipsReglaPp);
             if ($ip === '') {
                 throw new RuntimeException('Se acabaron las IPs del bloque PPPoE. El ingeniero debe habilitar el siguiente bloque ('
                     . ppSiguienteBloque() . ') en el router antes de dar más altas.');
