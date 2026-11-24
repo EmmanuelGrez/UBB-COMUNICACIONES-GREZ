@@ -24,6 +24,18 @@ function ppLeer(Client $router, Query $query): array
     return array_values(array_filter($respuesta, fn ($f) => is_array($f) && isset($f['.id'])));
 }
 
+/** "20000000/25000000" (bits) -> "20M/25M". Subida/bajada, como lo muestra Winbox. */
+function ppVelocidad(string $maxLimit): string
+{
+    $partes = [];
+    foreach (explode('/', $maxLimit) as $v) {
+        $n = (int) $v;
+        $partes[] = $n >= 1000000 ? rtrim(rtrim(number_format($n / 1000000, 1, '.', ''), '0'), '.') . 'M'
+            : ($n >= 1000 ? round($n / 1000) . 'k' : (string) $n);
+    }
+    return implode('/', $partes);
+}
+
 const PP_RED_INICIO = '10.2.0.2';
 const PP_RED_FIN = '10.2.3.254';
 const PP_GATEWAY = '10.2.0.1';
@@ -99,6 +111,10 @@ $ipsUsadasPp = [];
 $secretsPp = [];
 $soloRadiusPp = [];
 $routerOkPp = false;
+$colasDinPp = 0;
+$colasFijasPp = 0;
+$colasPp = [];
+$colasOkPp = false;
 $pdoPp = null;
 
 $csrfPp = $_SESSION['csrf_radius_pppoe'] ?? '';
@@ -122,6 +138,25 @@ try {
             $ipsUsadasPp[(string) $a['address']] = 'la sesión activa de ' . (string) ($a['name'] ?? '?');
         }
     }
+    /* Colas simples: el router crea una dinámica "<pppoe-USUARIO>" por cada cliente conectado.
+       Solo se leen para contarlas y mostrar la velocidad; no se cambian. */
+    try {
+        foreach (ppLeer($routerPp, new Query('/queue/simple/print', ['=.proplist=.id,name,dynamic,max-limit'])) as $q) {
+            $dinamica = in_array(strtolower((string) ($q['dynamic'] ?? 'false')), ['true', 'yes'], true);
+            if (!$dinamica) {
+                $colasFijasPp++;
+                continue;
+            }
+            $colasDinPp++;
+            if (preg_match('/^<pppoe-(.+)>$/', (string) ($q['name'] ?? ''), $m)) {
+                $colasPp[strtolower($m[1])] = ppVelocidad((string) ($q['max-limit'] ?? ''));
+            }
+        }
+        $colasOkPp = true;
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS PPPoE: sin colas: ' . $e->getMessage());
+    }
+
     $bloqueadosUisp = [];
     foreach (ppLeer($routerPp, (new Query('/ip/firewall/address-list/print', ['=.proplist=.id,address']))->where('list', PP_LISTA_UISP)) as $f) {
         $bloqueadosUisp[(string) $f['address']] = true;
@@ -153,6 +188,7 @@ try {
             'comentario' => (string) ($s['comment'] ?? ''),
             'en_linea' => $activo !== null,
             'uptime' => (string) ($activo['uptime'] ?? ''),
+            'cola' => $colasPp[strtolower($usuario)] ?? '',
             'mac' => (string) ($activo['caller-id'] ?? ($s['last-caller-id'] ?? '')),
             'ultima' => (string) ($s['last-logged-out'] ?? ''),
             'uisp' => $ip !== '' && isset($bloqueadosUisp[$ip]),
@@ -277,6 +313,7 @@ $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
 $migradosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
+$sinColaPp = $colasOkPp ? count(array_filter($clientesPp, fn ($c) => $c['en_linea'] && $c['cola'] === '')) : 0;
 $porPlanPp = [];
 foreach ($clientesPp as $c) {
     $porPlanPp[$c['plan']] = ($porPlanPp[$c['plan']] ?? 0) + 1;
@@ -356,10 +393,22 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
         <div><b><?= $migradosPp ?></b><span>migrados a RADIUS</span></div>
+        <?php if ($colasOkPp): ?>
+        <div title="Colas simples del router: las dinámicas las crea el router, una por cliente conectado; las fijas son las de la configuración.">
+            <b><?= $colasDinPp + $colasFijasPp ?></b><span>colas simples<br><?= $colasDinPp ?> dinámicas · <?= $colasFijasPp ?> fijas</span></div>
+        <?php endif; ?>
         <?php if ($porPlanPp !== []): ?><div class="g-planes"><span>Por plan</span>
             <?php foreach ($porPlanPp as $p => $n): ?><em><?= escapar($p) ?> · <?= $n ?></em><?php endforeach; ?>
         </div><?php endif; ?>
     </section>
+
+    <?php if ($colasOkPp): ?>
+        <?php if ($sinColaPp > 0): ?>
+            <div class="error">Hay <?= $sinColaPp ?> cliente(s) en línea sin cola de velocidad. Filtra por "En línea sin cola" para verlos.</div>
+        <?php else: ?>
+            <div class="ok">Revisión: <?= $enLineaPp ?> en línea y <?= $colasDinPp ?> colas dinámicas. Cada cliente conectado tiene su cola de velocidad.</div>
+        <?php endif; ?>
+    <?php endif; ?>
 
     <div class="filtros">
         <?= portalBuscador('buscar', 'Usuario, IP o MAC') ?>
@@ -367,6 +416,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <option value="">Todos</option>
             <option value="linea">En línea</option>
             <option value="fuera">Desconectados</option>
+            <option value="sincola">En línea sin cola</option>
             <option value="uisp">Bloqueados en UISP</option>
             <option value="radius">Migrados a RADIUS</option>
         </select>
@@ -388,6 +438,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <?php foreach ($clientesPp as $c):
                 $estados = [];
                 if ($c['en_linea']) $estados[] = 'linea'; else $estados[] = 'fuera';
+                if ($colasOkPp && $c['en_linea'] && $c['cola'] === '') $estados[] = 'sincola';
                 if ($c['uisp']) $estados[] = 'uisp';
                 if ($c['radius']) $estados[] = 'radius';
             ?>
@@ -400,6 +451,8 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                     <td data-t="Conexión">
                         <?php if ($c['en_linea']): ?>
                             <span class="pill ok">En línea</span> <small><?= escapar($c['uptime']) ?></small>
+                            <?php if ($c['cola'] !== ''): ?><br><small title="Velocidad de su cola en el router (subida/bajada)">cola <?= escapar($c['cola']) ?></small>
+                            <?php elseif ($colasOkPp): ?><br><span class="pill susp">Sin cola</span><?php endif; ?>
                         <?php else: ?>
                             <span class="pill gris">Desconectado</span>
                             <?php if ($c['ultima'] !== ''): ?><br><small>desde <?= escapar($c['ultima']) ?></small><?php endif; ?>
