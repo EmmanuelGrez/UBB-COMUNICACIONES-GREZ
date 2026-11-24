@@ -96,6 +96,68 @@ function uispPorRouter(Client $router, string $metodo, string $ruta, ?array $cue
     return ['ok' => $ok, 'datos' => $datos, 'error' => $error];
 }
 
+/**
+ * Igual que uispPorRouter (solo GET), pero para respuestas grandes (> 64 KB): el router guarda la respuesta
+ * en un archivo temporal, se lee por partes y se borra. Requiere que el grupo del usuario del panel
+ * tenga permiso de leer archivos (si no, devuelve el error del router).
+ */
+function uispPorRouterGrande(Client $router, string $ruta, string $api = 'nms'): array
+{
+    $cabecera = $api === 'nms' ? 'x-auth-token: ' . uispTokenNms() : 'X-Auth-App-Key: ' . uispLlave();
+    $archivo = 'ubb-tmp-' . bin2hex(random_bytes(4)) . '.json';
+    $leer = function (Query $q) use ($router): array {
+        $nivel = error_reporting(error_reporting() & ~E_DEPRECATED);
+        try {
+            $r = $router->query($q)->read(false);
+        } finally {
+            error_reporting($nivel);
+        }
+        $out = ['data' => '', 'error' => '', 'status' => ''];
+        foreach ($r as $linea) {
+            if (preg_match('/^=([a-z-]+)=(.*)$/s', (string) $linea, $m)) {
+                if ($m[1] === 'data') {
+                    $out['data'] .= $m[2];
+                } elseif ($m[1] === 'message' || $m[1] === 'failure') {
+                    $out['error'] = $m[2];
+                } elseif ($m[1] === 'status') {
+                    $out['status'] = $m[2];
+                }
+            }
+        }
+        return $out;
+    };
+    try {
+        $f = $leer((new Query('/tool/fetch'))
+            ->equal('url', ($api === 'nms' ? UISP_PUENTE_NMS : UISP_PUENTE_API) . $ruta)
+            ->equal('check-certificate', 'no')
+            ->equal('http-header-field', $cabecera)
+            ->equal('output', 'file')
+            ->equal('dst-path', $archivo));
+        if ($f['error'] !== '' || $f['status'] !== 'finished') {
+            return ['ok' => false, 'datos' => '', 'error' => $f['error'] ?: 'estado: ' . $f['status']];
+        }
+        $datos = '';
+        for ($offset = 0, $vueltas = 0; $vueltas < 200; $vueltas++) {
+            $r = $leer((new Query('/file/read'))->equal('file', $archivo)->equal('offset', (string) $offset)->equal('chunk-size', '32768'));
+            if ($r['error'] !== '') {
+                return ['ok' => false, 'datos' => '', 'error' => 'leyendo el archivo: ' . $r['error']];
+            }
+            $datos .= $r['data'];
+            if (strlen($r['data']) < 32768) {
+                break;
+            }
+            $offset += strlen($r['data']);
+        }
+        return ['ok' => true, 'datos' => $datos, 'error' => ''];
+    } finally {
+        try {
+            $leer((new Query('/file/remove'))->equal('numbers', $archivo));
+        } catch (Throwable $e) {
+            // Si no se pudo borrar, queda un archivo ubb-tmp-*.json sin datos de clientes sensibles en Files.
+        }
+    }
+}
+
 /* ---------- Sincronizar acciones del panel con UISP ---------- */
 
 const UISP_PUENTE_ACTIVO = '/etc/ubb-panel/uisp-sync-activo';   // si existe este archivo, el panel avisa a UISP
@@ -344,8 +406,13 @@ foreach ($argv ?? [] as $arg) {
         $sitio = (array) json_decode($s['datos'], true);
         echo "   nombre: " . ($sitio['identification']['name'] ?? '?') . ", tipo: " . ($sitio['identification']['type'] ?? '?') . "\n";
     }
-    foreach (['', '&role=station', '&role=router', '&type=onu'] as $filtro) {
-        $d = uispPorRouter($router, 'GET', '/devices?siteId=' . rawurlencode($m[1]) . $filtro, null, 'nms');
+    foreach (['', '&role=router', 'ARCHIVO'] as $filtro) {
+        $d = $filtro === 'ARCHIVO'
+            ? uispPorRouterGrande($router, '/devices?siteId=' . rawurlencode($m[1]))
+            : uispPorRouter($router, 'GET', '/devices?siteId=' . rawurlencode($m[1]) . $filtro, null, 'nms');
+        if ($filtro === 'ARCHIVO') {
+            $filtro = ' por archivo temporal, sin límite';
+        }
         echo "Equipos" . ($filtro === '' ? '' : " ($filtro)") . ": ";
         if (!$d['ok']) {
             echo "falló -> {$d['error']}\n";
