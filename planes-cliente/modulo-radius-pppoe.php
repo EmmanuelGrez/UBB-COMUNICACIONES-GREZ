@@ -48,6 +48,25 @@ function ppIpLibre(array $usadas): string
     return '';
 }
 
+/** Revisa una IP escrita a mano. Devuelve null si se puede usar, o el motivo en palabras. */
+function ppRevisarIp(string $ip, array $usadas): ?string
+{
+    if (!filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) {
+        return 'No es una IP válida.';
+    }
+    $n = ip2long($ip);
+    if ($n < ip2long(PP_RED_INICIO) - 2 || $n > ip2long(PP_RED_FIN) + 1) {
+        return 'Está fuera de la red PPPoE (10.2.0.0 a 10.2.3.255).';
+    }
+    if (($n & 255) === 0 || ($n & 255) === 255 || $ip === PP_GATEWAY) {
+        return 'No se puede usar: terminada en .0 o .255, o es el gateway 10.2.0.1.';
+    }
+    if (isset($usadas[$ip])) {
+        return 'Ya la usa ' . $usadas[$ip] . '.';
+    }
+    return null;
+}
+
 /** Contraseña fácil de dictar: 10 caracteres sin letras/números que se confunden. */
 function ppGenerarPass(): string
 {
@@ -100,7 +119,7 @@ try {
     foreach (ppLeer($routerPp, new Query('/ppp/active/print', ['=.proplist=.id,name,address,uptime,caller-id'])) as $a) {
         $activos[strtolower((string) ($a['name'] ?? ''))] = $a;
         if (!empty($a['address'])) {
-            $ipsUsadasPp[(string) $a['address']] = true;
+            $ipsUsadasPp[(string) $a['address']] = 'la sesión activa de ' . (string) ($a['name'] ?? '?');
         }
     }
     $bloqueadosUisp = [];
@@ -122,7 +141,7 @@ try {
         $ip = (string) ($s['remote-address'] ?? '');
         $secretsPp[strtolower($usuario)] = true;
         if ($ip !== '') {
-            $ipsUsadasPp[$ip] = true;
+            $ipsUsadasPp[$ip] = $usuario . ' (cuenta del router)';
         }
         $activo = $activos[strtolower($usuario)] ?? null;
         $clientesPp[] = [
@@ -171,7 +190,7 @@ if ($pdoPp instanceof PDO) {
                              LEFT JOIN radreply gr ON gr.username = ip.username AND gr.attribute = 'Mikrotik-Group'
                              WHERE ip.attribute = 'Framed-IP-Address' AND ip.value LIKE '10.2.%'");
         foreach ($st->fetchAll() as $f) {
-            $ipsUsadasPp[(string) $f['ip']] = true;
+            $ipsUsadasPp[(string) $f['ip']] = (string) $f['username'] . ' (RADIUS)';
             if (!isset($secretsPp[strtolower((string) $f['username'])])) {
                 $soloRadiusPp[] = $f;
             }
@@ -218,9 +237,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
         if ((int) $st->fetchColumn() > 0) {
             throw new RuntimeException("El usuario $usuario ya existe en RADIUS. No se dio de alta.");
         }
-        $ip = ppIpLibre($ipsUsadasPp);   // se calcula de nuevo al guardar, no se confía en la del formulario
+        $ip = trim((string) ($_POST['ip'] ?? ''));
         if ($ip === '') {
-            throw new RuntimeException('No quedan IPs libres en la red PPPoE 10.2.0.0/22.');
+            $ip = ppIpLibre($ipsUsadasPp);
+            if ($ip === '') {
+                throw new RuntimeException('No quedan IPs libres en la red PPPoE 10.2.0.0/22.');
+            }
+        } elseif (($motivoIp = ppRevisarIp($ip, $ipsUsadasPp)) !== null) {
+            // Se revisa otra vez al guardar con los datos del momento, no solo en la pantalla.
+            throw new RuntimeException("IP $ip: $motivoIp No se dio de alta.");
         }
         $pdoPp->beginTransaction();
         $pdoPp->prepare("INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)")
@@ -279,13 +304,14 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         <?php else: ?>
         <form class="alta" method="post" action="?modulo=radius-pppoe"
               data-confirmar="¿Dar de alta esta cuenta PPPoE en RADIUS?"
-              data-detalle="Se crea el usuario con la IP fija <?= escapar($ipSugeridaPp) ?> (o la siguiente libre al guardar) y el perfil elegido. No cambia ninguna cuenta existente."
+              data-detalle="Se crea el usuario con la IP fija y el perfil elegidos. Antes de guardar se revisa otra vez que estén libres. No cambia ninguna cuenta existente."
               data-verbo="Dar de alta">
             <input type="hidden" name="csrf_radius_pppoe" value="<?= escapar($csrfPp) ?>">
             <input type="hidden" name="accion" value="alta_pppoe">
             <div>
                 <label for="pp-usuario">Usuario</label>
-                <input id="pp-usuario" name="usuario" placeholder="UBB-TP123456" required pattern="[A-Za-z0-9._@\-]{3,64}" autocomplete="off">
+                <input id="pp-usuario" name="usuario" placeholder="UBB-TP123456" required autocomplete="off" aria-describedby="pp-usuario-msg">
+                <small class="campo-msg" id="pp-usuario-msg" aria-live="polite"></small>
             </div>
             <div>
                 <label for="pp-pass">Contraseña</label>
@@ -299,11 +325,17 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                 </select>
             </div>
             <div>
-                <label>IP fija</label>
-                <input value="<?= escapar($ipSugeridaPp ?: 'sin IPs libres') ?>" readonly class="mono" aria-label="IP fija que se asignará">
+                <label for="pp-ip">IP fija</label>
+                <input id="pp-ip" name="ip" value="<?= escapar($ipSugeridaPp) ?>" class="mono" inputmode="decimal" autocomplete="off"
+                       placeholder="vacía = la siguiente libre" aria-describedby="pp-ip-msg">
+                <small class="campo-msg" id="pp-ip-msg" aria-live="polite"></small>
             </div>
-            <button class="b-alta" type="submit">Dar de alta</button>
+            <button class="b-alta" type="submit" id="pp-guardar">Dar de alta</button>
         </form>
+        <script type="application/json" id="pp-ocupados"><?= json_encode([
+            'ips' => $ipsUsadasPp,
+            'usuarios' => array_values(array_unique(array_merge(array_keys($secretsPp), array_keys($enRadiusPp)))),
+        ], JSON_HEX_TAG | JSON_HEX_AMP | JSON_UNESCAPED_UNICODE) ?></script>
         <?php endif; ?>
         <?php if ($soloRadiusPp !== []): ?>
             <h3 style="margin:18px 0 8px;font-size:15px">Cuentas dadas de alta solo en RADIUS (<?= count($soloRadiusPp) ?>)</h3>
@@ -397,6 +429,51 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     </section>
 <?php portalFin(); ?>
 <script>
+/* Alta PPPoE: avisa en rojo mientras se escribe (el servidor vuelve a revisar al guardar). */
+(function () {
+    var datos = document.getElementById('pp-ocupados');
+    if (!datos) return;
+    var ocupados = JSON.parse(datos.textContent), usuarios = {};
+    ocupados.usuarios.forEach(function (u) { usuarios[String(u).toLowerCase()] = true; });
+    var u = document.getElementById('pp-usuario'), ip = document.getElementById('pp-ip'), boton = document.getElementById('pp-guardar');
+    function num(t) {
+        var p = t.split('.');
+        if (p.length !== 4) return null;
+        for (var i = 0; i < 4; i++) { if (!/^\d{1,3}$/.test(p[i]) || +p[i] > 255) return null; }
+        return ((+p[0] * 256 + +p[1]) * 256 + +p[2]) * 256 + +p[3];
+    }
+    function revisarUsuario(v) {
+        if (v === '') return '';
+        if (!/^[A-Za-z0-9._@-]{3,64}$/.test(v)) return 'Usuario no válido: 3 a 64 caracteres, solo letras, números y . _ @ -';
+        if (usuarios[v.toLowerCase()]) return 'Ese usuario ya existe (en el router o en RADIUS).';
+        return null;
+    }
+    function revisarIp(v) {
+        if (v === '') return null;
+        var n = num(v);
+        if (n === null) return 'No es una IP válida.';
+        if (n < num('10.2.0.0') || n > num('10.2.3.255')) return 'Está fuera de la red PPPoE (10.2.0.0 a 10.2.3.255).';
+        if (n % 256 === 0 || n % 256 === 255 || v === '10.2.0.1') return 'No se puede usar: terminada en .0 o .255, o es el gateway 10.2.0.1.';
+        if (ocupados.ips[v]) return 'Ya la usa ' + ocupados.ips[v] + '.';
+        return null;
+    }
+    function pintar(campo, msg, okTexto) {
+        var m = document.getElementById(campo.id + '-msg');
+        campo.classList.toggle('campo-mal', !!msg);
+        campo.setAttribute('aria-invalid', msg ? 'true' : 'false');
+        m.className = 'campo-msg' + (msg ? ' mal' : (msg === null && okTexto ? ' bien' : ''));
+        m.textContent = msg ? msg : (msg === null ? okTexto : '');
+        return !msg;
+    }
+    function revisar() {
+        var a = pintar(u, revisarUsuario(u.value.trim()), 'Disponible');
+        var b = pintar(ip, revisarIp(ip.value.trim()), ip.value.trim() === '' ? 'Se usará la siguiente libre' : 'IP libre');
+        boton.disabled = !(a && b) || u.value.trim() === '';
+    }
+    u.addEventListener('input', revisar);
+    ip.addEventListener('input', revisar);
+    revisar();
+})();
 (function () {
     var filas = Array.prototype.slice.call(document.querySelectorAll('#filas tr[data-buscar]'));
     var buscar = document.getElementById('buscar'), estado = document.getElementById('f-estado'),

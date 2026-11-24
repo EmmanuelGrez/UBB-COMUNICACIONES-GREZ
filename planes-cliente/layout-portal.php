@@ -207,6 +207,11 @@ dialog.confirmar::backdrop{background:rgba(41,36,53,.45)}
 dialog.confirmar h2{margin:0 0 8px;font-size:18px;font-weight:600;color:var(--plum);line-height:1.3}
 dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
 .dlg-acciones{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.campo-msg{display:block;min-height:16px;margin-top:4px;font-size:12px;font-weight:600;color:var(--muted)}
+.campo-msg.mal{color:var(--red)}
+.campo-msg.bien{color:#1f7a45}
+input.campo-mal{border-color:var(--red);box-shadow:0 0 0 2px rgba(190,50,60,.15)}
+button:disabled{opacity:.5;cursor:not-allowed}
 .dlg-clave{display:block;margin:0 0 16px;font-size:13px;font-weight:600;color:var(--plum-2)}
 .dlg-clave input{display:block;width:100%;margin-top:6px}
 @media(max-width:760px){.buscador{width:100%;flex-wrap:wrap}.buscador span{width:100%}}
