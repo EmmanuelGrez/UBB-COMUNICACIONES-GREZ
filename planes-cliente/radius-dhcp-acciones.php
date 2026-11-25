@@ -680,7 +680,8 @@ function rdAvisarMonitoreo(?PDO $pdo, string $accion, array $quien, string $moti
     ]]);
     $respuesta = @file_get_contents(RD_MONITOREO_URL, false, $ctx);
     $codigo = 0;
-    if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', $http_response_header[0] . ' ', $m)) {
+    $cabeceras = function_exists('http_get_last_response_headers') ? (http_get_last_response_headers() ?? []) : ($http_response_header ?? []);
+    if (isset($cabeceras[0]) && preg_match('/\s(\d{3})\s/', $cabeceras[0] . ' ', $m)) {
         $codigo = (int) $m[1];
     }
     if ($respuesta !== false && $codigo >= 200 && $codigo < 300) {
