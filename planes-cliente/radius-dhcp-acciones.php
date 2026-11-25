@@ -568,3 +568,76 @@ function rdReactivar(PDO $pdo, Client $router, array $cfg, string $mac, string $
     rdBitacora($pdo, $mac, $ip, 'reactivar', 'vuelve a ' . $original, $origen);
     return "Reactivado: $mac ($ip) con $original. $nota" . $notaUisp;
 }
+
+/**
+ * Cambia el plan (lista de velocidad) de un cliente DHCP en RADIUS y lo aplica en el router.
+ * Si está suspendido, solo guarda el plan para cuando se reactive. $cfg = config de la VLAN con 'vlan'.
+ */
+function rdCambiarPlan(PDO $pdo, Client $router, array $cfg, string $mac, string $plan, string $origen = 'PANEL', string $nota = ''): string
+{
+    $cliente = rdLeerCliente($pdo, $mac);
+    $ip = $cliente['ip'];
+    if (strpos($ip, $cfg['prefijo']) !== 0) {
+        throw new RuntimeException("La MAC $mac no pertenece a la VLAN {$cfg['vlan']}.");
+    }
+    if (!in_array($plan, rdPlanesDisponibles($router, (string) $cfg['vlan']), true)) {
+        throw new RuntimeException("El plan $plan no existe en el router para la VLAN {$cfg['vlan']}. No se cambió nada.");
+    }
+    if ($cliente['lista'] === RD_LISTA_DEUDORES) {
+        // Suspendido: se guarda el plan nuevo para cuando se reactive.
+        $st = $pdo->prepare("UPDATE ubb_suspensiones SET lista_original = ? WHERE username = ?");
+        $st->execute([$plan, $mac]);
+        if ($st->rowCount() === 0) {
+            throw new RuntimeException("$mac está suspendido pero no tiene registro de suspensión. No se cambió nada.");
+        }
+        $mensaje = "Plan guardado: $mac ($ip) tendrá $plan cuando se reactive.";
+    } else {
+        if ($cliente['lista'] === $plan) {
+            throw new RuntimeException("$mac ($ip) ya tiene el plan $plan.");
+        }
+        $renuevaEn = rdSegundosParaRenovar($router, $mac, $ip, $cfg['servidor']);
+        $pdo->prepare("UPDATE radreply SET value = ? WHERE username = ? AND attribute = 'Mikrotik-Address-List'")
+            ->execute([$plan, $mac]);
+        rdQuitarConcesion($router, $mac);
+        $aviso = rdPuenteTemporal($router, $mac, $ip, $plan, $renuevaEn);
+        rdCortarConexiones($router, $ip);
+        $mensaje = "Plan cambiado: $mac ($ip) de {$cliente['lista']} a $plan. $aviso";
+    }
+    rdBitacora($pdo, $mac, $ip, 'cambiar_plan', trim($cliente['lista'] . ' -> ' . $plan . ' ' . $nota), $origen);
+    return $mensaje;
+}
+
+/** Plan vigente de un cliente: su lista, o la que tendrá al reactivarse si está suspendido. */
+function rdPlanVigente(PDO $pdo, string $mac): string
+{
+    $lista = rdLeerCliente($pdo, $mac)['lista'];
+    if ($lista !== RD_LISTA_DEUDORES) {
+        return $lista;
+    }
+    $st = $pdo->prepare("SELECT lista_original FROM ubb_suspensiones WHERE username = ?");
+    $st->execute([$mac]);
+    return (string) ($st->fetchColumn() ?: $lista);
+}
+
+/** Revisa la clave de acciones con el mismo bloqueo por intentos que el resto del panel. */
+function rdExigirClave(string $clave): void
+{
+    $bloqueo = (int) ($_SESSION['clave_rd_bloqueo'] ?? 0);
+    if ($bloqueo > time()) {
+        throw new RuntimeException('Demasiados intentos con clave incorrecta. Espera ' . (int) ceil(($bloqueo - time()) / 60) . ' min.');
+    }
+    if (!rdClaveConfigurada()) {
+        throw new RuntimeException('Falta configurar la clave de acciones en el servidor.');
+    }
+    if (!rdVerificarClave($clave)) {
+        $fallos = (int) ($_SESSION['clave_rd_fallos'] ?? 0) + 1;
+        $_SESSION['clave_rd_fallos'] = $fallos;
+        error_log('UBB panel: clave de acciones incorrecta (' . $fallos . ') desde ' . ($_SERVER['REMOTE_ADDR'] ?? '?'));
+        if ($fallos >= 5) {
+            $_SESSION['clave_rd_bloqueo'] = time() + 600;
+            $_SESSION['clave_rd_fallos'] = 0;
+        }
+        throw new RuntimeException('Clave incorrecta. No se cambió nada.');
+    }
+    $_SESSION['clave_rd_fallos'] = 0;
+}
