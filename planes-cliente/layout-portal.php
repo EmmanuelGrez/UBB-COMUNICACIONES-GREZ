@@ -217,6 +217,7 @@ dialog.confirmar p{margin:0 0 18px;color:var(--muted)}
 .campo-msg.bien{color:#1f7a45}
 input.campo-mal{border-color:var(--red);box-shadow:0 0 0 2px rgba(190,50,60,.15)}
 button:disabled{opacity:.5;cursor:not-allowed}
+.dlg-clave[hidden]{display:none}
 .dlg-clave{display:block;margin:0 0 16px;font-size:13px;font-weight:600;color:var(--plum-2)}
 .dlg-clave input{display:block;width:100%;margin-top:6px}
 @media(max-width:760px){.buscador{width:100%;flex-wrap:wrap}.buscador span{width:100%}}
