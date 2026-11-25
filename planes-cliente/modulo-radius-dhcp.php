@@ -151,39 +151,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
                 $_SESSION['flash_radius_dhcp_ok'] = rdReactivar($pdoRd, $router, $cfgRd, $mac);
             }
         } elseif ($accion === 'cambiar_plan') {
-            $plan = (string) ($_POST['plan'] ?? '');
-            $cliente = rdLeerCliente($pdoRd, $mac);
-            $ip = $cliente['ip'];
-            if (strpos($ip, $cfgRd['prefijo']) !== 0) {
-                throw new RuntimeException("La MAC $mac no pertenece a la VLAN $vlanRd.");
-            }
             $configRouter = $mikrotikConfig;
             $configRouter['host'] = $cfgRd['router'];
             $router = crearClienteMikrotik($configRouter);
-            if (!in_array($plan, rdPlanesDisponibles($router, $vlanRd), true)) {
-                throw new RuntimeException("El plan $plan no existe en el router para la VLAN $vlanRd. No se cambió nada.");
-            }
-            if ($cliente['lista'] === RD_LISTA_DEUDORES) {
-                // Suspendido: se guarda el plan nuevo para cuando se reactive.
-                $st = $pdoRd->prepare("UPDATE ubb_suspensiones SET lista_original = ? WHERE username = ?");
-                $st->execute([$plan, $mac]);
-                if ($st->rowCount() === 0) {
-                    throw new RuntimeException("$mac está suspendido pero no tiene registro de suspensión. No se cambió nada.");
-                }
-                $_SESSION['flash_radius_dhcp_ok'] = "Plan guardado: $mac ($ip) tendrá $plan cuando se reactive.";
-            } else {
-                if ($cliente['lista'] === $plan) {
-                    throw new RuntimeException("$mac ($ip) ya tiene el plan $plan.");
-                }
-                $renuevaEn = rdSegundosParaRenovar($router, $mac, $ip, $cfgRd['servidor']);
-                $pdoRd->prepare("UPDATE radreply SET value = ? WHERE username = ? AND attribute = 'Mikrotik-Address-List'")
-                    ->execute([$plan, $mac]);
-                rdQuitarConcesion($router, $mac);
-                $nota = rdPuenteTemporal($router, $mac, $ip, $plan, $renuevaEn);
-                rdCortarConexiones($router, $ip);
-                $_SESSION['flash_radius_dhcp_ok'] = "Plan cambiado: $mac ($ip) de {$cliente['lista']} a $plan. $nota";
-            }
-            rdBitacora($pdoRd, $mac, $ip, 'cambiar_plan', $cliente['lista'] . ' -> ' . $plan);
+            $_SESSION['flash_radius_dhcp_ok'] = rdCambiarPlan($pdoRd, $router, $cfgRd + ['vlan' => $vlanRd], $mac, (string) ($_POST['plan'] ?? ''));
         } else {
             throw new RuntimeException('Operación no reconocida.');
         }
@@ -638,6 +609,8 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
         var guardado = JSON.parse(sessionStorage.getItem(clave) || '{}');
         buscar.value = guardado.q || ''; estado.value = guardado.e || ''; plan.value = guardado.p || '';
     } catch (e) {}
+    var desdeUrl = new URLSearchParams(location.search).get('buscar');
+    if (desdeUrl) { buscar.value = desdeUrl; estado.value = ''; plan.value = ''; } // viene de "Ver equipo" en Avisos
     function filtrar() {
         var q = buscar.value.trim().toLowerCase(), e = estado.value, p = plan.value, n = 0;
         filas.forEach(function (tr) {
