@@ -11,6 +11,8 @@
 use RouterOS\Client;
 use RouterOS\Query;
 
+require_once __DIR__ . '/radius-dhcp-acciones.php'; // clave de acciones y bitácora (compartidas con DHCP)
+
 const PP_ROUTER = '10.0.1.6';
 const PP_LISTA_DEUDORES = 'CLIENTES-DEUDORES';
 const PP_LISTA_UISP = 'BLOCKED_USERS';
@@ -307,6 +309,125 @@ $perfilesAltaPp = ppPerfilesAlta($perfilesPp);
 $ipSugeridaPp = ppIpLibre($ipsUsadasPp, $ipsReglaPp);
 
 /* ---------- Alta de una cuenta PPPoE nueva en RADIUS ---------- */
+/* ---------- Fase 2: suspender / reactivar / cambiar plan (solo clientes migrados) ---------- */
+
+/** Corta la sesión PPPoE para que el módem se reconecte y tome lo nuevo de RADIUS. Devuelve si había sesión. */
+function ppReconectar(Client $router, string $usuario): bool
+{
+    $hubo = false;
+    foreach (ppLeer($router, (new Query('/ppp/active/print', ['=.proplist=.id']))->where('name', $usuario)) as $a) {
+        ppLeer($router, (new Query('/ppp/active/remove'))->equal('.id', (string) $a['.id']));
+        $hubo = true;
+    }
+    return $hubo;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['pp_suspender', 'pp_reactivar', 'pp_plan'], true)) {
+    $accionPp = (string) $_POST['accion'];
+    try {
+        if (!hash_equals($csrfPp, (string) ($_POST['csrf_radius_pppoe'] ?? ''))) {
+            throw new RuntimeException('La sesión del formulario venció. Recarga la pantalla.');
+        }
+        if (!$routerOkPp || !($pdoPp instanceof PDO)) {
+            throw new RuntimeException('Sin conexión con el router o con RADIUS. No se cambió nada.');
+        }
+        $bloqueo = (int) ($_SESSION['clave_rd_bloqueo'] ?? 0);
+        if ($bloqueo > time()) {
+            throw new RuntimeException('Demasiados intentos con clave incorrecta. Espera ' . (int) ceil(($bloqueo - time()) / 60) . ' min.');
+        }
+        if (!rdClaveConfigurada()) {
+            throw new RuntimeException('Falta configurar la clave de acciones en el servidor.');
+        }
+        if (!rdVerificarClave((string) ($_POST['clave'] ?? ''))) {
+            $fallos = (int) ($_SESSION['clave_rd_fallos'] ?? 0) + 1;
+            $_SESSION['clave_rd_fallos'] = $fallos;
+            if ($fallos >= 5) {
+                $_SESSION['clave_rd_bloqueo'] = time() + 600;
+                $_SESSION['clave_rd_fallos'] = 0;
+            }
+            throw new RuntimeException('Clave incorrecta. No se cambió nada.');
+        }
+        $_SESSION['clave_rd_fallos'] = 0;
+
+        $usuario = (string) ($_POST['usuario'] ?? '');
+        $cli = null;
+        foreach ($clientesPp as $c) {
+            if (strcasecmp($c['usuario'], $usuario) === 0) {
+                $cli = $c;
+                break;
+            }
+        }
+        if ($cli === null) {
+            throw new RuntimeException("No encontré la cuenta $usuario en el router.");
+        }
+        // (los contadores de la pantalla se calculan más abajo; aquí se revisa con los datos del momento)
+        $cli['migrado'] = $cli['desactivado'] && $cli['radius'];
+        $st = $pdoPp->prepare("SELECT COUNT(*) FROM radreply WHERE username = ? AND attribute = 'Mikrotik-Address-List' AND value = ?");
+        $st->execute([$cli['usuario'], PP_LISTA_DEUDORES]);
+        $cli['susp_radius'] = (int) $st->fetchColumn() > 0;
+        if (!$cli['migrado']) {
+            throw new RuntimeException("$usuario todavía entra con su cuenta del router: cambiarlo en RADIUS no tendría efecto. Primero hay que migrarlo.");
+        }
+        $u = $cli['usuario'];
+        $ip = $cli['ip'];
+
+        if ($accionPp === 'pp_suspender') {
+            if ($cli['susp_radius']) {
+                throw new RuntimeException("$u ya estaba suspendido.");
+            }
+            $pdoPp->beginTransaction();
+            $pdoPp->prepare("REPLACE INTO ubb_suspensiones (username, lista_original, ip, origen) VALUES (?, ?, ?, 'PANEL')")
+                ->execute([$u, 'perfil ' . $cli['perfil'], $ip]);
+            $pdoPp->prepare("DELETE FROM radreply WHERE username = ? AND attribute = 'Mikrotik-Address-List'")->execute([$u]);
+            $pdoPp->prepare("INSERT INTO radreply (username, attribute, op, value) VALUES (?, 'Mikrotik-Address-List', ':=', ?)")
+                ->execute([$u, PP_LISTA_DEUDORES]);
+            $pdoPp->commit();
+            $conectado = ppReconectar($routerPp, $u);
+            rdBitacora($pdoPp, $u, $ip, 'suspender', 'PPPoE, estaba ' . $cli['perfil'], 'PANEL');
+            $_SESSION['flash_radius_pppoe_ok'] = "Suspendido: $u ($ip). " . ($conectado ? 'Se reconectó y ya ve la página de adeudo.' : 'No estaba conectado; al conectarse verá la página de adeudo.');
+        } elseif ($accionPp === 'pp_reactivar') {
+            if (!$cli['susp_radius']) {
+                throw new RuntimeException("$u no está suspendido por RADIUS.");
+            }
+            $pdoPp->beginTransaction();
+            $pdoPp->prepare("DELETE FROM radreply WHERE username = ? AND attribute = 'Mikrotik-Address-List'")->execute([$u]);
+            $pdoPp->prepare("DELETE FROM ubb_suspensiones WHERE username = ?")->execute([$u]);
+            $pdoPp->commit();
+            $conectado = ppReconectar($routerPp, $u);
+            rdBitacora($pdoPp, $u, $ip, 'reactivar', 'PPPoE, vuelve a ' . $cli['perfil'], 'PANEL');
+            $_SESSION['flash_radius_pppoe_ok'] = "Reactivado: $u ($ip) con su plan " . ppPlan($cli['perfil']) . '. ' . ($conectado ? 'Se reconectó.' : 'Tomará su plan al conectarse.');
+        } else {
+            $perfil = (string) ($_POST['perfil'] ?? '');
+            if (!in_array($perfil, $perfilesAltaPp, true)) {
+                throw new RuntimeException('Elige un perfil de la lista.');
+            }
+            $st = $pdoPp->prepare("SELECT value FROM radreply WHERE username = ? AND attribute = 'Mikrotik-Group'");
+            $st->execute([$u]);
+            $anterior = (string) ($st->fetchColumn() ?: '');
+            if ($anterior === $perfil) {
+                throw new RuntimeException("$u ya tiene el perfil $perfil.");
+            }
+            $pdoPp->beginTransaction();
+            $pdoPp->prepare("DELETE FROM radreply WHERE username = ? AND attribute = 'Mikrotik-Group'")->execute([$u]);
+            $pdoPp->prepare("INSERT INTO radreply (username, attribute, op, value) VALUES (?, 'Mikrotik-Group', ':=', ?)")->execute([$u, $perfil]);
+            $pdoPp->commit();
+            // La cuenta local (desactivada) se deja igual: es el respaldo para regresarlo si algo falla.
+            $conectado = $cli['susp_radius'] ? false : ppReconectar($routerPp, $u);
+            rdBitacora($pdoPp, $u, $ip, 'cambiar_plan', "PPPoE, $anterior -> $perfil", 'PANEL');
+            $_SESSION['flash_radius_pppoe_ok'] = "Plan cambiado: $u ahora tiene $perfil. "
+                . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'));
+        }
+    } catch (Throwable $e) {
+        if ($pdoPp instanceof PDO && $pdoPp->inTransaction()) {
+            $pdoPp->rollBack();
+        }
+        $_SESSION['flash_radius_pppoe_error'] = $e instanceof RuntimeException ? $e->getMessage() : 'No se pudo completar la acción. No se cambió nada.';
+        error_log('UBB RADIUS PPPoE ' . $accionPp . ': ' . $e->getMessage());
+    }
+    header('Location: ?modulo=radius-pppoe');
+    exit;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_pppoe') {
     try {
         if (!hash_equals($csrfPp, (string) ($_POST['csrf_radius_pppoe'] ?? ''))) {
@@ -383,9 +504,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
 $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
+$suspRadiusPp = [];
+if ($pdoPp instanceof PDO) {
+    try {
+        $st = $pdoPp->prepare("SELECT username FROM radreply WHERE attribute = 'Mikrotik-Address-List' AND value = ?");
+        $st->execute([PP_LISTA_DEUDORES]);
+        foreach ($st->fetchAll(PDO::FETCH_COLUMN) as $u) {
+            $suspRadiusPp[strtolower((string) $u)] = true;
+        }
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS PPPoE: sin suspensiones: ' . $e->getMessage());
+    }
+}
 foreach ($clientesPp as &$c) {
     // Migrado = su cuenta local está desactivada y existe en RADIUS: ahora entra por RADIUS.
     $c['migrado'] = $c['desactivado'] && $c['radius'];
+    $c['susp_radius'] = isset($suspRadiusPp[strtolower($c['usuario'])]);
 }
 unset($c);
 $copiadosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
@@ -570,16 +704,39 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                     <td data-t="Estado">
                         <?php if ($c['desactivado'] && !$c['migrado']): ?><span class="pill gris">Desactivado</span><?php endif; ?>
                         <?php if ($c['uisp']): ?><span class="pill uisp">Bloqueado en UISP</span><?php endif; ?>
-                        <?php if ($c['suspendido']): ?><span class="pill susp">Suspendido RADIUS</span><?php endif; ?>
-                        <?php if (!$c['uisp'] && !$c['suspendido'] && (!$c['desactivado'] || $c['migrado'])): ?><span class="pill ok">Activo</span><?php endif; ?>
+                        <?php if ($c['suspendido'] || $c['susp_radius']): ?><span class="pill susp"><?= $c['susp_radius'] ? 'Suspendido RADIUS' : 'En CLIENTES-DEUDORES' ?></span><?php endif; ?>
+                        <?php if (!$c['uisp'] && !$c['suspendido'] && !$c['susp_radius'] && (!$c['desactivado'] || $c['migrado'])): ?><span class="pill ok">Activo</span><?php endif; ?>
                         <br><?php if ($c['migrado']): ?><span class="pill rad" title="Su cuenta del router está desactivada; entra por RADIUS">Migrado a RADIUS</span>
                         <?php elseif ($c['radius']): ?><span class="pill gris" title="Tiene copia en RADIUS, pero todavía entra con la cuenta del router">Copia en RADIUS</span>
                         <?php else: ?><span class="pill gris">Solo en router</span><?php endif; ?>
                     </td>
                     <td><div class="acciones">
-                        <?php if ($c['radius']): ?>
-                            <button class="b-plan" disabled title="Se activa en la fase 2">Cambiar plan</button>
-                            <button class="b-susp" disabled title="Se activa en la fase 2">Suspender</button>
+                        <?php if ($c['migrado']): ?>
+                            <form method="post" action="?modulo=radius-pppoe" class="plan-form"
+                                  data-confirmar="¿Cambiar el plan de <?= escapar($c['usuario']) ?>?"
+                                  data-detalle="Se cambia su perfil en RADIUS y se reconecta (corte de unos segundos)."
+                                  data-verbo="Cambiar plan" data-pedir-clave="1">
+                                <input type="hidden" name="csrf_radius_pppoe" value="<?= escapar($csrfPp) ?>">
+                                <input type="hidden" name="accion" value="pp_plan">
+                                <input type="hidden" name="usuario" value="<?= escapar($c['usuario']) ?>">
+                                <input type="hidden" name="clave" value="">
+                                <select name="perfil" aria-label="Nuevo perfil" required>
+                                    <?php foreach ($perfilesAltaPp as $p): ?><option value="<?= escapar($p) ?>" <?= $p === $c['perfil'] ? 'selected' : '' ?>><?= escapar(ppPlan($p)) ?></option><?php endforeach; ?>
+                                </select>
+                                <button class="b-plan" type="submit">Cambiar plan</button>
+                            </form>
+                            <form method="post" action="?modulo=radius-pppoe"
+                                  data-confirmar="<?= $c['susp_radius'] ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($c['usuario']) ?>?"
+                                  data-detalle="<?= $c['susp_radius'] ? 'Vuelve a su plan y se reconecta.' : 'Pasa a CLIENTES-DEUDORES (página de adeudo) y se reconecta.' ?> IP <?= escapar($c['ip']) ?>."
+                                  data-verbo="<?= $c['susp_radius'] ? 'Reactivar' : 'Suspender' ?>" data-tono="<?= $c['susp_radius'] ? '' : 'peligro' ?>" data-pedir-clave="1">
+                                <input type="hidden" name="csrf_radius_pppoe" value="<?= escapar($csrfPp) ?>">
+                                <input type="hidden" name="accion" value="<?= $c['susp_radius'] ? 'pp_reactivar' : 'pp_suspender' ?>">
+                                <input type="hidden" name="usuario" value="<?= escapar($c['usuario']) ?>">
+                                <input type="hidden" name="clave" value="">
+                                <button class="<?= $c['susp_radius'] ? 'b-alta' : 'b-susp' ?>" type="submit"><?= $c['susp_radius'] ? 'Reactivar' : 'Suspender' ?></button>
+                            </form>
+                        <?php elseif ($c['radius']): ?>
+                            <span class="tenue" title="Tiene copia en RADIUS, pero entra con la cuenta del router. Se activan al migrarlo.">Aún no migrado</span>
                         <?php else: ?>
                             <span class="tenue" title="Los botones se activan cuando el cliente esté migrado a RADIUS">Solo consulta</span>
                         <?php endif; ?>
