@@ -298,9 +298,35 @@ if ($pdoPp instanceof PDO) {
             }
             if (!isset($secretsPp[strtolower((string) $f['username'])])) {
                 $soloRadiusPp[] = $f;
+                if ($routerOkPp) {
+                    /* Alta nueva (sin cuenta en el router): entra por RADIUS igual que un migrado,
+                       así que va en la tabla general con sus botones. */
+                    $usuario = (string) $f['username'];
+                    $ip = (string) $f['ip'];
+                    $activo = $activos[strtolower($usuario)] ?? null;
+                    $clientesPp[] = [
+                        'usuario' => $usuario,
+                        'ip' => $ip,
+                        'perfil' => (string) ($f['perfil'] ?? ''),
+                        'plan' => ppPlan((string) ($f['perfil'] ?? '')),
+                        'desactivado' => true,
+                        'solo_radius' => true,
+                        'radius' => true,
+                        'comentario' => '',
+                        'en_linea' => $activo !== null,
+                        'por_radius' => $activo !== null,
+                        'uptime' => (string) ($activo['uptime'] ?? ''),
+                        'cola' => $colasPp[strtolower($usuario)] ?? '',
+                        'mac' => (string) ($activo['caller-id'] ?? ''),
+                        'ultima' => '',
+                        'uisp' => isset($bloqueadosUisp[$ip]),
+                        'suspendido' => isset($deudores[$ip]),
+                    ];
+                }
             }
         }
         usort($soloRadiusPp, fn ($a, $b) => strnatcasecmp($a['ip'], $b['ip']));
+        usort($clientesPp, fn ($a, $b) => strnatcasecmp($a['ip'], $b['ip']) ?: strnatcasecmp($a['usuario'], $b['usuario']));
     } catch (Throwable $e) {
         error_log('UBB RADIUS PPPoE: sin cuentas de RADIUS: ' . $e->getMessage());
     }
@@ -523,7 +549,7 @@ foreach ($clientesPp as &$c) {
 }
 unset($c);
 $copiadosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
-$migradosPp = count(array_filter($clientesPp, fn ($c) => $c['migrado']));
+$migradosPp = count(array_filter($clientesPp, fn ($c) => $c['migrado'] && empty($c['solo_radius'])));
 $porRadiusPp = count(array_filter($clientesPp, fn ($c) => $c['por_radius']));
 $sinColaPp = $colasOkPp ? count(array_filter($clientesPp, fn ($c) => $c['en_linea'] && $c['cola'] === '')) : 0;
 $porPlanPp = [];
@@ -625,7 +651,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     </details>
 
     <section class="general">
-        <div class="g-total"><b><?= $totalPp ?></b><span>clientes PPPoE<br>en el router</span></div>
+        <div class="g-total"><b><?= $totalPp ?></b><span>clientes PPPoE<br>router + RADIUS</span></div>
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
         <div title="Su cuenta del router está desactivada y ahora entra por RADIUS"><b><?= $migradosPp ?></b><span>migrados a RADIUS<br><?= $porRadiusPp ?> conectados por RADIUS</span></div>
@@ -706,7 +732,8 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                         <?php if ($c['uisp']): ?><span class="pill uisp">Bloqueado en UISP</span><?php endif; ?>
                         <?php if ($c['suspendido'] || $c['susp_radius']): ?><span class="pill susp"><?= $c['susp_radius'] ? 'Suspendido RADIUS' : 'En CLIENTES-DEUDORES' ?></span><?php endif; ?>
                         <?php if (!$c['uisp'] && !$c['suspendido'] && !$c['susp_radius'] && (!$c['desactivado'] || $c['migrado'])): ?><span class="pill ok">Activo</span><?php endif; ?>
-                        <br><?php if ($c['migrado']): ?><span class="pill rad" title="Su cuenta del router está desactivada; entra por RADIUS">Migrado a RADIUS</span>
+                        <br><?php if (!empty($c['solo_radius'])): ?><span class="pill rad" title="Dada de alta directo en RADIUS; no tiene cuenta en el router">Alta en RADIUS</span>
+                        <?php elseif ($c['migrado']): ?><span class="pill rad" title="Su cuenta del router está desactivada; entra por RADIUS">Migrado a RADIUS</span>
                         <?php elseif ($c['radius']): ?><span class="pill gris" title="Tiene copia en RADIUS, pero todavía entra con la cuenta del router">Copia en RADIUS</span>
                         <?php else: ?><span class="pill gris">Solo en router</span><?php endif; ?>
                     </td>
