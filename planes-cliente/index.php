@@ -1478,6 +1478,77 @@ usort($planesDisponibles, function ($a, $b) use ($ordenPlanes) {
 
 });
 
+
+/* ---------- Actividad reciente (solo en Perfiles MikroTik) ----------
+   Avisos de equipos de la plataforma (asignados/retirados sin revisar) y las últimas suspensiones y
+   reactivaciones de la bitácora (panel, UBB Pagos o UISP). Solo lectura. */
+$actividadReciente = [];
+$avisosPendientes = null;
+$actividadError = '';
+if ($moduloActual === 'perfiles') {
+    require_once __DIR__ . '/avisos-api.php';
+    $respAvisos = avApi('GET', '/notificaciones.php', 3);
+    if ($respAvisos['ok']) {
+        $listaAvisos = (array) ($respAvisos['datos']['avisos'] ?? []);
+        $avisosPendientes = count($listaAvisos);
+        foreach ($listaAvisos as $a) {
+            $eqA = avDatosEquipo($a);
+            $asignado = ($a['tipo'] ?? '') === 'EQUIPO_ASIGNADO';
+            $actividadReciente[] = [
+                'fecha' => (string) ($a['fecha_creacion'] ?? ''),
+                'tipo' => $asignado ? 'asignado' : 'retirado',
+                'titulo' => ($asignado ? 'Equipo asignado' : 'Equipo retirado') . ' · ' . (string) ($a['codigo_servicio'] ?? ''),
+                'detalle' => trim(($eqA['nombre'] !== '' ? $eqA['nombre'] . ' · ' : '') . $eqA['mac'] . ' · ' . (string) ($a['cliente'] ?? ''), ' ·'),
+                'enlace' => '?modulo=avisos',
+            ];
+        }
+    } else {
+        $actividadError = 'Avisos de equipos: ' . $respAvisos['error'];
+    }
+    try {
+        $configBitacora = $dbConfig;
+        $configBitacora['database'] = 'radius';
+        $pdoBitacora = obtenerPDO($configBitacora);
+        $st = $pdoBitacora->query("SELECT fecha, mac, ip, accion, detalle, origen FROM ubb_bitacora
+                                   WHERE accion IN ('suspender', 'reactivar') ORDER BY id DESC LIMIT 8");
+        foreach ($st->fetchAll() as $b) {
+            $susp = $b['accion'] === 'suspender';
+            $actividadReciente[] = [
+                'fecha' => (string) $b['fecha'],
+                'tipo' => $susp ? 'suspendido' : 'reactivado',
+                'titulo' => ($susp ? 'Suspendido' : 'Reactivado') . ' · ' . (string) $b['ip'],
+                'detalle' => trim((string) $b['mac'] . ' · desde ' . (string) $b['origen'] . ((string) $b['detalle'] !== '' ? ' · ' . (string) $b['detalle'] : ''), ' ·'),
+                'enlace' => '?modulo=bitacora&accion=' . ($susp ? 'suspender' : 'reactivar'),
+            ];
+        }
+    } catch (Throwable $e) {
+        error_log('UBB Actividad reciente: ' . $e->getMessage());
+        $actividadError .= ($actividadError !== '' ? ' · ' : '') . 'Bitácora no disponible.';
+    }
+    usort($actividadReciente, fn ($x, $y) => strcmp($y['fecha'], $x['fecha']));
+    $actividadReciente = array_slice($actividadReciente, 0, 12);
+}
+
+/** "hace 5 min", "hace 3 h", "24/11 18:07". */
+function haceCuanto(string $fecha): string
+{
+    $t = strtotime($fecha);
+    if ($t === false) {
+        return '';
+    }
+    $seg = time() - $t;
+    if ($seg < 60) {
+        return 'hace un momento';
+    }
+    if ($seg < 3600) {
+        return 'hace ' . (int) floor($seg / 60) . ' min';
+    }
+    if ($seg < 86400) {
+        return 'hace ' . (int) floor($seg / 3600) . ' h';
+    }
+    return date('d/m H:i', $t);
+}
+
 ?>
 
 <!DOCTYPE html>
@@ -1736,8 +1807,21 @@ body[data-modulo="perfiles"] .estadisticas,
 body[data-modulo="perfiles"] #catalogo,
 body[data-modulo="perfiles"] .module-placeholder{display:none!important}
 body[data-modulo="perfiles"] .dashboard-grid{display:grid!important;grid-template-columns:1fr!important}
-body[data-modulo="perfiles"] .directorio-section,
-body[data-modulo="perfiles"] #actividad{display:none!important}
+body[data-modulo="perfiles"] .directorio-section{display:none!important}
+body:not([data-modulo="perfiles"]) #actividad{display:none!important}
+.actividad-lista{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+.actividad-item{display:grid;grid-template-columns:32px 1fr auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #ece7f5;border-radius:10px;background:#fff;text-decoration:none;color:inherit}
+.actividad-item:hover,.actividad-item:focus-visible{background:#faf8fe;border-color:#d9cfee}
+.actividad-icono{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;font-weight:800;font-size:14px}
+.act-asignado .actividad-icono{background:#e3f4ea;color:#1f7a45}
+.act-retirado .actividad-icono{background:#fdeceb;color:#b3261e}
+.act-suspendido .actividad-icono{background:#fdeceb;color:#b3261e}
+.act-reactivado .actividad-icono{background:#e8f0fd;color:#2457a6}
+.actividad-texto{min-width:0;display:grid;gap:2px}
+.actividad-texto strong{font-size:13px;color:#2f2440}
+.actividad-texto small{font-size:12px;color:#6f6880;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.actividad-item time{font-size:12px;color:#8a8398;white-space:nowrap}
+.actividad-error{margin:0 0 8px;font-size:12px;color:#b3261e}
 body[data-modulo="perfiles"] .insights-column{display:grid!important;grid-template-columns:1fr!important}
 
 body[data-modulo="solicitudes"] #inicio,
@@ -2151,17 +2235,39 @@ body:not([data-modulo="inicio"]) .pppoe-mini-resumen{display:none!important}
                 <div class="panel-cabecera">
                     <div>
                         <h2>Actividad reciente</h2>
-                        <p>Estado de integración de avisos entre módulos.</p>
+                        <p>Avisos de equipos de la plataforma y últimas suspensiones o reactivaciones.</p>
                     </div>
-                    <span class="etiqueta">Pendiente</span>
+                    <?php if ($avisosPendientes !== null): ?>
+                        <a class="etiqueta" href="?modulo=avisos"><?= (int) $avisosPendientes ?> aviso<?= $avisosPendientes === 1 ? '' : 's' ?> sin revisar</a>
+                    <?php endif; ?>
                 </div>
-                <div class="activity-empty">
-                    <div class="activity-mark">i</div>
-                    <div>
-                        <strong>Historial no conectado</strong>
-                        <p>Los avisos no se consultan desde inventario en esta versión. Se mostrarán cuando exista una fuente autorizada para el módulo de actividad.</p>
+                <?php if ($actividadError !== ''): ?>
+                    <p class="actividad-error"><?= escapar($actividadError) ?></p>
+                <?php endif; ?>
+                <?php if ($actividadReciente === []): ?>
+                    <div class="activity-empty">
+                        <div class="activity-mark">i</div>
+                        <div>
+                            <strong>Sin actividad reciente</strong>
+                            <p>Aquí aparecen los equipos asignados o retirados y las suspensiones o reactivaciones.</p>
+                        </div>
                     </div>
-                </div>
+                <?php else: ?>
+                    <ul class="actividad-lista">
+                        <?php foreach ($actividadReciente as $act): ?>
+                            <li>
+                                <a href="<?= escapar($act['enlace']) ?>" class="actividad-item act-<?= escapar($act['tipo']) ?>">
+                                    <span class="actividad-icono" aria-hidden="true"><?= ['asignado' => '+', 'retirado' => '−', 'suspendido' => '■', 'reactivado' => '▶'][$act['tipo']] ?? 'i' ?></span>
+                                    <span class="actividad-texto">
+                                        <strong><?= escapar($act['titulo']) ?></strong>
+                                        <small><?= escapar($act['detalle']) ?></small>
+                                    </span>
+                                    <time datetime="<?= escapar($act['fecha']) ?>"><?= escapar(haceCuanto($act['fecha'])) ?></time>
+                                </a>
+                            </li>
+                        <?php endforeach; ?>
+                    </ul>
+                <?php endif; ?>
             </section>
         </aside>
 
