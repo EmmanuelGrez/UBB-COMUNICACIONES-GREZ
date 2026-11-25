@@ -192,7 +192,7 @@ try {
     $routerPp = crearClienteMikrotik($configRouterPp);
 
     $activos = [];
-    foreach (ppLeer($routerPp, new Query('/ppp/active/print', ['=.proplist=.id,name,address,uptime,caller-id'])) as $a) {
+    foreach (ppLeer($routerPp, new Query('/ppp/active/print', ['=.proplist=.id,name,address,uptime,caller-id,radius'])) as $a) {
         $activos[strtolower((string) ($a['name'] ?? ''))] = $a;
         if (!empty($a['address'])) {
             $ipsUsadasPp[(string) $a['address']] = 'la sesión activa de ' . (string) ($a['name'] ?? '?');
@@ -250,6 +250,7 @@ try {
             'desactivado' => in_array(strtolower((string) ($s['disabled'] ?? 'false')), ['true', 'yes'], true),
             'comentario' => (string) ($s['comment'] ?? ''),
             'en_linea' => $activo !== null,
+            'por_radius' => $activo !== null && in_array(strtolower((string) ($activo['radius'] ?? 'false')), ['true', 'yes'], true),
             'uptime' => (string) ($activo['uptime'] ?? ''),
             'cola' => $colasPp[strtolower($usuario)] ?? '',
             'mac' => (string) ($activo['caller-id'] ?? ($s['last-caller-id'] ?? '')),
@@ -382,7 +383,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
 $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
-$migradosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
+foreach ($clientesPp as &$c) {
+    // Migrado = su cuenta local está desactivada y existe en RADIUS: ahora entra por RADIUS.
+    $c['migrado'] = $c['desactivado'] && $c['radius'];
+}
+unset($c);
+$copiadosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
+$migradosPp = count(array_filter($clientesPp, fn ($c) => $c['migrado']));
+$porRadiusPp = count(array_filter($clientesPp, fn ($c) => $c['por_radius']));
 $sinColaPp = $colasOkPp ? count(array_filter($clientesPp, fn ($c) => $c['en_linea'] && $c['cola'] === '')) : 0;
 $porPlanPp = [];
 foreach ($clientesPp as $c) {
@@ -395,7 +403,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
 ?>
 
     <div class="fase"><b>Fase 1 · solo consulta.</b> Esta pantalla no cambia nada. Los botones se activan para cada cliente cuando esté migrado a RADIUS
-        (<?= $migradosPp ?> de <?= $totalPp ?> hoy). Para suspender o reactivar mientras tanto, usa UISP.</div>
+        (<?= $migradosPp ?> de <?= $totalPp ?> hoy; <?= $copiadosPp ?> ya tienen su copia en RADIUS). Para suspender o reactivar mientras tanto, usa UISP.</div>
 
     <?php if ($errorPp !== ''): ?><div class="error"><?= escapar($errorPp) ?></div><?php endif; ?>
     <?php if ($flashPpOk !== ''): ?><div class="ok"><?= escapar($flashPpOk) ?></div><?php endif; ?>
@@ -486,7 +494,8 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         <div class="g-total"><b><?= $totalPp ?></b><span>clientes PPPoE<br>en el router</span></div>
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
-        <div><b><?= $migradosPp ?></b><span>migrados a RADIUS</span></div>
+        <div title="Su cuenta del router está desactivada y ahora entra por RADIUS"><b><?= $migradosPp ?></b><span>migrados a RADIUS<br><?= $porRadiusPp ?> conectados por RADIUS</span></div>
+        <div title="Tienen su cuenta copiada en RADIUS, pero todavía entran con la cuenta del router"><b><?= $copiadosPp ?></b><span>copiados a RADIUS</span></div>
         <?php if ($colasOkPp): ?>
         <div title="Colas simples del router: las dinámicas las crea el router, una por cliente conectado; las fijas son las de la configuración.">
             <b><?= $colasDinPp + $colasFijasPp ?></b><span>colas simples<br><?= $colasDinPp ?> dinámicas · <?= $colasFijasPp ?> fijas</span></div>
@@ -512,7 +521,9 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <option value="fuera">Desconectados</option>
             <option value="sincola">En línea sin cola</option>
             <option value="uisp">Bloqueados en UISP</option>
-            <option value="radius">Migrados a RADIUS</option>
+            <option value="migrado">Migrados a RADIUS</option>
+            <option value="porradius">Conectados por RADIUS</option>
+            <option value="radius">Copiados a RADIUS</option>
         </select>
         <select id="f-plan" aria-label="Plan">
             <option value="">Todos los planes</option>
@@ -535,6 +546,8 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                 if ($colasOkPp && $c['en_linea'] && $c['cola'] === '') $estados[] = 'sincola';
                 if ($c['uisp']) $estados[] = 'uisp';
                 if ($c['radius']) $estados[] = 'radius';
+                if ($c['migrado']) $estados[] = 'migrado';
+                if ($c['por_radius']) $estados[] = 'porradius';
             ?>
                 <tr data-buscar="<?= escapar(strtolower($c['usuario'] . ' ' . $c['ip'] . ' ' . $c['mac'] . ' ' . $c['comentario'])) ?>"
                     data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['plan']) ?>">
@@ -545,6 +558,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                     <td data-t="Conexión">
                         <?php if ($c['en_linea']): ?>
                             <span class="pill ok">En línea</span> <small><?= escapar($c['uptime']) ?></small>
+                            <?php if ($c['por_radius']): ?><small class="tenue"> · por RADIUS</small><?php endif; ?>
                             <?php if ($c['cola'] !== ''): ?><br><small title="Velocidad de su cola en el router (subida/bajada)">cola <?= escapar($c['cola']) ?></small>
                             <?php elseif ($colasOkPp): ?><br><span class="pill susp">Sin cola</span><?php endif; ?>
                         <?php else: ?>
@@ -554,11 +568,13 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                         <?php if ($c['mac'] !== ''): ?><br><small class="mono"><?= escapar($c['mac']) ?></small><?php endif; ?>
                     </td>
                     <td data-t="Estado">
-                        <?php if ($c['desactivado']): ?><span class="pill gris">Desactivado</span><?php endif; ?>
+                        <?php if ($c['desactivado'] && !$c['migrado']): ?><span class="pill gris">Desactivado</span><?php endif; ?>
                         <?php if ($c['uisp']): ?><span class="pill uisp">Bloqueado en UISP</span><?php endif; ?>
                         <?php if ($c['suspendido']): ?><span class="pill susp">Suspendido RADIUS</span><?php endif; ?>
-                        <?php if (!$c['uisp'] && !$c['suspendido'] && !$c['desactivado']): ?><span class="pill ok">Activo</span><?php endif; ?>
-                        <br><span class="pill <?= $c['radius'] ? 'rad' : 'gris' ?>"><?= $c['radius'] ? 'En RADIUS' : 'En router' ?></span>
+                        <?php if (!$c['uisp'] && !$c['suspendido'] && (!$c['desactivado'] || $c['migrado'])): ?><span class="pill ok">Activo</span><?php endif; ?>
+                        <br><?php if ($c['migrado']): ?><span class="pill rad" title="Su cuenta del router está desactivada; entra por RADIUS">Migrado a RADIUS</span>
+                        <?php elseif ($c['radius']): ?><span class="pill gris" title="Tiene copia en RADIUS, pero todavía entra con la cuenta del router">Copia en RADIUS</span>
+                        <?php else: ?><span class="pill gris">Solo en router</span><?php endif; ?>
                     </td>
                     <td><div class="acciones">
                         <?php if ($c['radius']): ?>
