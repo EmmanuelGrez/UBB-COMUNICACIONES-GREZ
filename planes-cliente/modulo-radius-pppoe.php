@@ -409,7 +409,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['
                 ->execute([$u, PP_LISTA_DEUDORES]);
             $pdoPp->commit();
             // Antes de desconectarlo: el monitoreo lo cuenta como corte administrativo y no como falla.
-            rdAvisarMonitoreo($pdoPp, 'BAJA_PAGO', ['usuario' => $u, 'mac' => $cli['mac']], 'Suspensión desde el panel', 'PANEL', $ip);
+            rdAvisarMonitoreo($pdoPp, 'BAJA_PAGO', ['usuario' => $u], 'Suspensión desde el panel', 'PANEL', $ip);
             $conectado = ppReconectar($routerPp, $u);
             rdBitacora($pdoPp, $u, $ip, 'suspender', 'PPPoE, estaba ' . $cli['perfil'], 'PANEL');
             $_SESSION['flash_radius_pppoe_ok'] = "Suspendido: $u ($ip). " . ($conectado ? 'Se reconectó y ya ve la página de adeudo.' : 'No estaba conectado; al conectarse verá la página de adeudo.');
@@ -423,7 +423,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['
             $pdoPp->commit();
             $conectado = ppReconectar($routerPp, $u);
             rdBitacora($pdoPp, $u, $ip, 'reactivar', 'PPPoE, vuelve a ' . $cli['perfil'], 'PANEL');
-            rdAvisarMonitoreo($pdoPp, 'REACTIVACION', ['usuario' => $u, 'mac' => $cli['mac']], 'Reactivación desde el panel', 'PANEL', $ip);
+            rdAvisarMonitoreo($pdoPp, 'REACTIVACION', ['usuario' => $u], 'Reactivación desde el panel', 'PANEL', $ip);
             $_SESSION['flash_radius_pppoe_ok'] = "Reactivado: $u ($ip) con su plan " . ppPlan($cli['perfil']) . '. ' . ($conectado ? 'Se reconectó.' : 'Tomará su plan al conectarse.');
         } else {
             $perfil = (string) ($_POST['perfil'] ?? '');
@@ -443,7 +443,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['
             // La cuenta local (desactivada) se deja igual: es el respaldo para regresarlo si algo falla.
             $conectado = $cli['susp_radius'] ? false : ppReconectar($routerPp, $u);
             rdBitacora($pdoPp, $u, $ip, 'cambiar_plan', "PPPoE, $anterior -> $perfil", 'PANEL');
-            rdAvisarMonitoreo($pdoPp, 'CAMBIO_PLAN', ['usuario' => $u, 'mac' => $cli['mac']], 'Cambio de ' . ppPlan($anterior) . ' a ' . ppPlan($perfil), 'PANEL', $ip);
+            rdAvisarMonitoreo($pdoPp, 'CAMBIO_PLAN', ['usuario' => $u], 'Cambio de ' . ppPlan($anterior) . ' a ' . ppPlan($perfil), 'PANEL', $ip);
             $_SESSION['flash_radius_pppoe_ok'] = "Plan cambiado: $u ahora tiene $perfil. "
                 . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'));
         }
