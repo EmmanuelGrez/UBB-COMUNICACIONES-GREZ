@@ -151,6 +151,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
                 $_SESSION['flash_radius_dhcp_ok'] = rdReactivar($pdoRd, $router, $cfgRd, $mac);
             }
         } elseif ($accion === 'cambiar_plan') {
+            rdExigirClave((string) ($_POST['clave'] ?? '')); // cambio de velocidad: pide la clave de acciones
             $configRouter = $mikrotikConfig;
             $configRouter['host'] = $cfgRd['router'];
             $router = crearClienteMikrotik($configRouter);
@@ -435,10 +436,11 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                         <form class="inline" method="post" action="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>"
                               data-confirmar="¿Cambiar el plan de <?= escapar($nombreRd) ?>?"
                               data-detalle="La nueva velocidad se aplica al momento; el equipo puede reconectarse unos segundos."
-                              data-verbo="Cambiar plan">
+                              data-verbo="Cambiar plan" data-pedir-clave="1">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
                             <input type="hidden" name="mac" value="<?= escapar($c['mac']) ?>">
                             <input type="hidden" name="accion" value="cambiar_plan">
+                            <input type="hidden" name="clave" value="">
                             <select name="plan" aria-label="Plan">
                                 <?php foreach ($planesRd as $planOp): ?>
                                     <option value="<?= escapar($planOp) ?>" <?= $planOp === $c['lista'] ? 'selected' : '' ?>><?= escapar(strtok($planOp, '_')) ?></option>
