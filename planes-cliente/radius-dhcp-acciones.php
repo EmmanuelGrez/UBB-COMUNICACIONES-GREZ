@@ -507,6 +507,8 @@ function rdSuspender(PDO $pdo, Client $router, string $mac, string $origen = 'PA
     if ($cliente['lista'] === RD_LISTA_DEUDORES) {
         throw new RuntimeException("$mac ($ip) ya estaba suspendido.");
     }
+    // 0. Avisar al monitoreo ANTES de cortar, para que lo cuente como corte por pago y no como falla.
+    rdAvisarMonitoreo($pdo, 'BAJA_PAGO', ['mac' => $mac], strtoupper($origen) === 'PAGOS' ? 'Adeudo mensual' : 'Suspensión desde el panel', $origen, $ip);
     // 1. Bloqueo inmediato en el router (si falla, RADIUS no cambia)
     if (rdIdsLista($router, $ip) === []) {
         rdRouter($router, (new Query('/ip/firewall/address-list/add'))
@@ -566,6 +568,7 @@ function rdReactivar(PDO $pdo, Client $router, array $cfg, string $mac, string $
     $nota = rdPuenteTemporal($router, $mac, $ip, $original, $renuevaEn);
     $pdo->prepare("DELETE FROM ubb_suspensiones WHERE username = ?")->execute([$mac]);
     rdBitacora($pdo, $mac, $ip, 'reactivar', 'vuelve a ' . $original, $origen);
+    rdAvisarMonitoreo($pdo, 'REACTIVACION', ['mac' => $mac], strtoupper($origen) === 'PAGOS' ? 'Pago registrado' : 'Reactivación desde el panel', $origen, $ip);
     return "Reactivado: $mac ($ip) con $original. $nota" . $notaUisp;
 }
 
@@ -604,6 +607,8 @@ function rdCambiarPlan(PDO $pdo, Client $router, array $cfg, string $mac, string
         $mensaje = "Plan cambiado: $mac ($ip) de {$cliente['lista']} a $plan. $aviso";
     }
     rdBitacora($pdo, $mac, $ip, 'cambiar_plan', trim($cliente['lista'] . ' -> ' . $plan . ' ' . $nota), $origen);
+    $de = $cliente['lista'] === RD_LISTA_DEUDORES ? 'suspendido' : strtok($cliente['lista'], '_');
+    rdAvisarMonitoreo($pdo, 'CAMBIO_PLAN', ['mac' => $mac], "Cambio de $de a " . strtok($plan, '_'), $origen, $ip);
     return $mensaje;
 }
 
@@ -640,4 +645,50 @@ function rdExigirClave(string $clave): void
         throw new RuntimeException('Clave incorrecta. No se cambió nada.');
     }
     $_SESSION['clave_rd_fallos'] = 0;
+}
+
+/* ---------- Aviso al monitoreo de Cristian (webhook administrativo) ---------- */
+
+const RD_MONITOREO_URL = 'http://192.168.100.224:5000/api/v1/webhook/administrativo';
+const RD_MONITOREO_LLAVE = '/etc/ubb-panel/monitoreo-webhook.key';
+
+/**
+ * Avisa al monitoreo que un corte, reactivación o cambio de plan es administrativo (no una falla).
+ * Apagado si no existe la llave. Nunca detiene la acción: si falla, queda en el log y en la bitácora.
+ * $quien = ['mac' => ..., 'usuario' => ...] (lo que se conozca).
+ */
+function rdAvisarMonitoreo(?PDO $pdo, string $accion, array $quien, string $motivo, string $origen, string $ip = ''): void
+{
+    $llave = trim((string) @file_get_contents(RD_MONITOREO_LLAVE));
+    if ($llave === '') {
+        return;
+    }
+    $datos = ['accion' => $accion];
+    foreach (['mac', 'usuario'] as $campo) {
+        if (!empty($quien[$campo])) {
+            $datos[$campo] = (string) $quien[$campo];
+        }
+    }
+    $datos += ['motivo' => $motivo, 'ejecutado_por' => strtoupper($origen) === 'PAGOS' ? 'Pagos' : 'Panel'];
+    $cuerpo = json_encode($datos, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $ctx = stream_context_create(['http' => [
+        'method' => 'POST',
+        'header' => "Content-Type: application/json\r\nX-API-Key: $llave\r\nContent-Length: " . strlen($cuerpo) . "\r\n",
+        'content' => $cuerpo,
+        'timeout' => 3,
+        'ignore_errors' => true,
+    ]]);
+    $respuesta = @file_get_contents(RD_MONITOREO_URL, false, $ctx);
+    $codigo = 0;
+    if (isset($http_response_header[0]) && preg_match('/\s(\d{3})\s/', $http_response_header[0] . ' ', $m)) {
+        $codigo = (int) $m[1];
+    }
+    if ($respuesta !== false && $codigo >= 200 && $codigo < 300) {
+        return;
+    }
+    $error = $respuesta === false ? 'sin respuesta' : "HTTP $codigo";
+    error_log("UBB monitoreo: $accion " . ($datos['mac'] ?? $datos['usuario'] ?? '?') . ": $error");
+    if ($pdo instanceof PDO) {
+        rdBitacora($pdo, (string) ($datos['mac'] ?? $datos['usuario'] ?? ''), $ip, 'aviso-monitoreo', "No se avisó $accion al monitoreo ($error)", $origen);
+    }
 }
