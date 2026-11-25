@@ -13,7 +13,7 @@ date_default_timezone_set('America/Mexico_City');
 
 // "Gestión de cambios" (solicitudes/historial) se retiró del menú; el código y la tabla historial_cambios
 // se conservan. Los enlaces viejos llevan a la Bitácora.
-$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'radius-dhcp', 'radius-pppoe', 'bitacora', 'avisos'];
+$modulosPermitidos = ['inicio', 'catalogo', 'perfiles', 'radius-dhcp', 'radius-pppoe', 'bitacora', 'avisos', 'notificaciones'];
 if (in_array($_GET['modulo'] ?? '', ['solicitudes', 'historial'], true)) {
     header('Location: ?modulo=bitacora');
     exit;
@@ -631,6 +631,10 @@ if ($moduloActual === 'radius-dhcp') {
 }
 
 /* BITÁCORA: historial de cambios y de llamadas a la API (solo consulta). */
+if ($moduloActual === 'notificaciones') {
+    require __DIR__ . '/modulo-notificaciones.php';
+    exit;
+}
 if ($moduloActual === 'avisos') {
     require __DIR__ . '/modulo-avisos.php';
     exit;
@@ -1485,7 +1489,7 @@ usort($planesDisponibles, function ($a, $b) use ($ordenPlanes) {
 $actividadReciente = [];
 $avisosPendientes = null;
 $actividadError = '';
-if ($moduloActual === 'perfiles') {
+if (false) { // "Actividad reciente" se reemplazó por los avisos flotantes en vivo (portalNotificaciones)
     require_once __DIR__ . '/avisos-api.php';
     $respAvisos = avApi('GET', '/notificaciones.php', 3);
     if ($respAvisos['ok']) {
@@ -1808,7 +1812,7 @@ body[data-modulo="perfiles"] #catalogo,
 body[data-modulo="perfiles"] .module-placeholder{display:none!important}
 body[data-modulo="perfiles"] .dashboard-grid{display:grid!important;grid-template-columns:1fr!important}
 body[data-modulo="perfiles"] .directorio-section{display:none!important}
-body:not([data-modulo="perfiles"]) #actividad{display:none!important}
+#actividad{display:none!important}
 .actividad-lista{list-style:none;margin:0;padding:0;display:grid;gap:6px}
 .actividad-item{display:grid;grid-template-columns:32px 1fr auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid #ece7f5;border-radius:10px;background:#fff;text-decoration:none;color:inherit}
 .actividad-item:hover,.actividad-item:focus-visible{background:#faf8fe;border-color:#d9cfee}
@@ -3244,6 +3248,7 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>
 
+<?php portalNotificaciones(); ?>
 </body>
 
 </html>
