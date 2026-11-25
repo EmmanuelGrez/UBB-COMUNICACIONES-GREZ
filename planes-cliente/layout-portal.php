@@ -320,4 +320,94 @@ function portalFin(): void
 })();
 </script>
 <?php
+    portalNotificaciones();
 }
+
+/**
+ * Avisos flotantes en vivo (esquina inferior derecha). Consulta ?modulo=notificaciones cada 30 s y muestra
+ * un cuadrito por cada aviso de equipo o suspensión/reactivación nueva. La primera vez solo toma nota de lo
+ * que ya existe (no avienta avisos viejos).
+ */
+function portalNotificaciones(): void
+{
+    ?>
+<div class="notifs" id="notifs" aria-live="polite" aria-label="Notificaciones"></div>
+<style>
+.notifs{position:fixed;right:18px;bottom:18px;z-index:1000;display:flex;flex-direction:column-reverse;gap:10px;width:min(360px,calc(100vw - 36px));pointer-events:none}
+.notif{pointer-events:auto;display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:start;padding:13px 14px;border-radius:16px;
+  background:rgba(255,255,255,.96);box-shadow:0 10px 30px rgba(40,25,70,.18),0 1px 3px rgba(40,25,70,.10);border:1px solid #ece7f5;
+  text-decoration:none;color:#2f2440;font-family:inherit;transform:translateY(12px);opacity:0;transition:transform .25s ease,opacity .25s ease}
+.notif.ver{transform:none;opacity:1}
+.notif:hover,.notif:focus-visible{border-color:#cfc3ea}
+.notif-icono{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:17px}
+.notif-asignado .notif-icono{background:#e3f4ea;color:#1f7a45}
+.notif-retirado .notif-icono,.notif-suspendido .notif-icono{background:#fdeceb;color:#b3261e}
+.notif-reactivado .notif-icono{background:#e8f0fd;color:#2457a6}
+.notif b{display:block;font-size:14px;margin-bottom:2px}
+.notif span.t{display:block;font-size:13px;line-height:1.4;color:#6f6880;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.notif small{font-size:12px;color:#9a93a8;white-space:nowrap}
+.notif-cerrar{grid-column:3;justify-self:end;border:0;background:none;color:#9a93a8;font-size:16px;line-height:1;cursor:pointer;padding:0 0 0 6px}
+@media (prefers-reduced-motion:reduce){.notif{transition:none}}
+</style>
+<script>
+(function () {
+    var caja = document.getElementById('notifs');
+    if (!caja || !window.fetch) return;
+    var CLAVE = 'ubb-notif-v1';
+    function leer() { try { return JSON.parse(localStorage.getItem(CLAVE) || 'null'); } catch (e) { return null; } }
+    function guardar(e) { try { localStorage.setItem(CLAVE, JSON.stringify(e)); } catch (x) {} }
+    var estado = leer();
+    var iconos = { asignado: '+', retirado: '\u2212', suspendido: '\u25A0', reactivado: '\u25B6' };
+
+    function mostrar(n) {
+        var a = document.createElement('a');
+        a.className = 'notif notif-' + n.tipo;
+        a.href = n.enlace;
+        var i = document.createElement('span'); i.className = 'notif-icono'; i.textContent = iconos[n.tipo] || 'i';
+        var c = document.createElement('span');
+        var b = document.createElement('b'); b.textContent = n.titulo;
+        var t = document.createElement('span'); t.className = 't'; t.textContent = n.texto;
+        c.appendChild(b); c.appendChild(t);
+        var h = document.createElement('small'); h.textContent = 'Ahora';
+        var x = document.createElement('button'); x.className = 'notif-cerrar'; x.type = 'button'; x.setAttribute('aria-label', 'Cerrar aviso'); x.textContent = '\u00D7';
+        x.addEventListener('click', function (ev) { ev.preventDefault(); quitar(a); });
+        var col = document.createElement('span'); col.style.display = 'grid'; col.style.justifyItems = 'end'; col.style.gap = '6px';
+        col.appendChild(h); col.appendChild(x);
+        a.appendChild(i); a.appendChild(c); a.appendChild(col);
+        caja.appendChild(a);
+        while (caja.children.length > 4) caja.removeChild(caja.firstChild);
+        requestAnimationFrame(function () { a.classList.add('ver'); });
+        var tiempo = setTimeout(function () { quitar(a); }, 9000);
+        a.addEventListener('mouseenter', function () { clearTimeout(tiempo); });
+    }
+    function quitar(a) { a.classList.remove('ver'); setTimeout(function () { if (a.parentNode) a.parentNode.removeChild(a); }, 260); }
+
+    function revisar() {
+        if (document.hidden) return;
+        var url = '?modulo=notificaciones&bit=' + (estado ? estado.bit : 0);
+        fetch(url, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                var idsAvisos = d.avisos.map(function (a) { return a.id; });
+                if (!estado) {
+                    // Primera vez en este navegador: solo tomar nota, sin avisar lo que ya había.
+                    estado = { bit: d.bit_max, avisos: idsAvisos };
+                    guardar(estado);
+                    return;
+                }
+                d.avisos.forEach(function (a) { if (estado.avisos.indexOf(a.id) === -1) mostrar(a); });
+                d.eventos.forEach(mostrar);
+                estado = { bit: Math.max(estado.bit, d.bit_max), avisos: idsAvisos.slice(-300) };
+                guardar(estado);
+            })
+            .catch(function () {});
+    }
+    revisar();
+    setInterval(revisar, 30000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) revisar(); });
+})();
+</script>
+<?php
+}
+
