@@ -35,24 +35,16 @@ $jam = new PDO('mysql:host=192.168.100.221;port=3306;dbname=ubb_plataforma;chars
     rtrim((string) file_get_contents('/etc/ubb/jamileth.pass'), "\r\n"),
     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_TIMEOUT => 10]);
 
-/* 1. Columna con el número de UISP en servicios */
+/* 1. Columnas de UISP en servicios: número de servicio (uisp_service_id) y sitio (uisp_location_id) */
 $columnas = array_column($jam->query('SHOW COLUMNS FROM servicios')->fetchAll(), 'Field');
-$colUisp = null;
-foreach ($columnas as $c) {
-    if (preg_match('/uisp/i', $c) && preg_match('/serv|id/i', $c)) { $colUisp = $c; break; }
-}
-if ($colUisp === null) {
-    foreach ($columnas as $c) {
-        if (preg_match('/uisp|ucrm|crm/i', $c)) { $colUisp = $c; break; }
-    }
-}
-if ($colUisp === null) {
-    fwrite(STDERR, "No encontré la columna del número de UISP en servicios. Columnas: " . implode(', ', $columnas) . "\n");
+if (!in_array('uisp_service_id', $columnas, true)) {
+    fwrite(STDERR, "No existe servicios.uisp_service_id. Columnas: " . implode(', ', $columnas) . "\n");
     exit(1);
 }
+$colSitio = in_array('uisp_location_id', $columnas, true) ? 'uisp_location_id' : null;
 
 /* 2. Servicios de la plataforma y los que ya tienen relación */
-$servicios = $jam->query("SELECT s.id_servicio, s.`$colUisp` AS uisp, s.estado, s.tecnologia,
+$servicios = $jam->query("SELECT s.id_servicio, s.uisp_service_id AS uisp, " . ($colSitio ? "s.`$colSitio`" : "''") . " AS sitio, s.estado, s.tecnologia,
                                  CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno) AS cliente
                           FROM servicios s JOIN clientes c ON c.id_cliente = s.id_cliente")->fetchAll();
 $conRelacion = [];
@@ -64,8 +56,10 @@ foreach ($jam->query("SELECT DISTINCT id_servicio FROM integracion_winbox
 
 /* 3. UISP: IPs de cada servicio */
 $ipsUisp = [];
-foreach ($radius->query("SELECT servicio_id, ip FROM ubb_uisp_mapa WHERE ip IS NOT NULL AND ip <> ''") as $r) {
+$ipsSitio = [];
+foreach ($radius->query("SELECT servicio_id, sitio_id, ip FROM ubb_uisp_mapa WHERE ip IS NOT NULL AND ip <> ''") as $r) {
     $ipsUisp[(int) $r['servicio_id']][trim($r['ip'])] = true;
+    if (!empty($r['sitio_id'])) $ipsSitio[strtolower((string) $r['sitio_id'])][trim($r['ip'])] = true;
 }
 
 /* 4. RADIUS: cuentas PPPoE por IP */
@@ -87,9 +81,13 @@ foreach ($servicios as $s) {
     if (isset($conRelacion[$id])) continue;
     $uisp = (int) $s['uisp'];
     $cands = [];
-    foreach (array_keys($ipsUisp[$uisp] ?? []) as $ip) {
+    $ipsDelServicio = $ipsUisp[$uisp] ?? [];
+    $ipsDelSitio = $ipsSitio[strtolower((string) $s['sitio'])] ?? [];
+    foreach (array_keys($ipsDelServicio + $ipsDelSitio) as $ip) {
         foreach ($cuentaPorIp[$ip] ?? [] as $cta) {
-            $cands[$cta['username']] = $cta;
+            // por = servicio y sitio coinciden (más seguro) / solo uno de los dos
+            $por = isset($ipsDelServicio[$ip]) && isset($ipsDelSitio[$ip]) ? 'servicio y sitio' : (isset($ipsDelServicio[$ip]) ? 'solo servicio' : 'solo sitio');
+            $cands[$cta['username']] = $cta + ['por' => $por];
         }
     }
     foreach ($cands as $u => $_) $usoCuenta[$u][] = $id;
@@ -98,13 +96,17 @@ foreach ($servicios as $s) {
 $cuenta = ['SEGURO' => 0, 'DUDOSO' => 0, 'SIN CUENTA PPPoE' => 0];
 foreach ($filas as &$f) {
     $n = count($f['cands']);
-    if ($n === 1 && count($usoCuenta[$f['cands'][0]['username']]) === 1 && $f['uisp'] > 0) {
+    if ($n === 1 && count($usoCuenta[$f['cands'][0]['username']]) === 1 && $f['uisp'] > 0
+        && ($f['cands'][0]['por'] === 'servicio y sitio' || $colSitio === null)) {
         $f['conf'] = 'SEGURO';
     } elseif ($n === 0) {
         $f['conf'] = 'SIN CUENTA PPPoE';
     } else {
         $f['conf'] = 'DUDOSO';
-        $f['nota'] = $n > 1 ? 'varias cuentas para este servicio' : 'la cuenta también aparece en otro servicio (' . implode(', ', $usoCuenta[$f['cands'][0]['username']]) . ')';
+        $f['nota'] = $n > 1 ? 'varias cuentas para este servicio'
+            : (count($usoCuenta[$f['cands'][0]['username']]) > 1
+                ? 'la cuenta también aparece en otro servicio (' . implode(', ', $usoCuenta[$f['cands'][0]['username']]) . ')'
+                : 'coincide ' . $f['cands'][0]['por'] . ', no los dos');
     }
     $cuenta[$f['conf']]++;
 }
@@ -112,20 +114,20 @@ unset($f);
 
 if ($csv) {
     $out = fopen('php://output', 'w');
-    fputcsv($out, ['confianza', 'id_servicio', 'cliente', 'estado', 'tecnologia', 'servicio_uisp', 'usuario_pppoe', 'ip', 'perfil', 'nota'], ',', '"', '');
+    fputcsv($out, ['confianza', 'id_servicio', 'cliente', 'estado', 'tecnologia', 'servicio_uisp', 'usuario_pppoe', 'ip', 'perfil', 'coincide_por', 'nota'], ',', '"', '');
     foreach ($filas as $f) {
         if ($f['cands'] === []) {
-            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], '', '', '', ''], ',', '"', '');
+            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], '', '', '', '', ''], ',', '"', '');
         }
         foreach ($f['cands'] as $c) {
-            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], $c['username'], $c['ip'], $c['perfil'], $f['nota'] ?? ''], ',', '"', '');
+            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], $c['username'], $c['ip'], $c['perfil'], $c['por'], $f['nota'] ?? ''], ',', '"', '');
         }
     }
     exit;
 }
 
 echo 'SOLO LECTURA · propuesta de relación servicio -> cuenta PPPoE · ' . date('Y-m-d H:i') . "\n";
-echo "Columna de UISP en servicios: $colUisp\n";
+echo "Cruce por uisp_service_id" . ($colSitio ? " y $colSitio (sitio)" : '') . "\n";
 echo 'Servicios en la plataforma: ' . count($servicios) . ' · ya relacionados: ' . count($conRelacion) . ' · sin relación: ' . count($filas) . "\n\n";
 foreach ($cuenta as $k => $n) printf("  %-18s %4d\n", $k, $n);
 echo "\nEjemplos SEGUROS:\n";
