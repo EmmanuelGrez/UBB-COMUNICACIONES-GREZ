@@ -855,6 +855,8 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
         });
         cuenta.textContent = n + ' de ' + filas.length + ' clientes';
     }
+    var desdeUrl = new URLSearchParams(location.search).get('buscar');
+    if (desdeUrl) { buscar.value = desdeUrl; } // viene del buscador general de Clientes DHCP
     buscar.addEventListener('input', filtrar);
     estado.addEventListener('change', filtrar);
     plan.addEventListener('change', filtrar);
