@@ -341,6 +341,7 @@ $enLineaRd = count(array_filter($clientesRd, fn ($c) => !empty($c['sesion_desde'
 /* ---------- Búsqueda general en todas las VLAN (?q=) ---------- */
 $qRd = trim((string) ($_GET['q'] ?? ''));
 $resultadosQ = [];
+$resultadosPpQ = [];
 $avisoQ = '';
 if ($qRd !== '' && $pdoRd instanceof PDO) {
     if (mb_strlen($qRd) < 3) {
@@ -397,6 +398,22 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
                 }
                 if (count($resultadosQ) >= 100) break;
             }
+            // Cuentas PPPoE (usuario o IP fija)
+            $resultadosPpQ = [];
+            $stPp = $pdoRd->query("
+                SELECT c.username AS usuario, ip.value AS ip, g.value AS perfil, li.value AS lista
+                FROM radcheck c
+                LEFT JOIN radreply ip ON ip.username = c.username AND ip.attribute = 'Framed-IP-Address'
+                LEFT JOIN radreply g ON g.username = c.username AND g.attribute = 'Mikrotik-Group'
+                LEFT JOIN radreply li ON li.username = c.username AND li.attribute = 'Mikrotik-Address-List'
+                WHERE c.attribute = 'Cleartext-Password'");
+            foreach ($stPp as $f) {
+                if (preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/i', (string) $f['usuario'])) continue; // DHCP (usuario = MAC)
+                if (strpos(strtolower($f['usuario'] . ' ' . $f['ip']), $aguja) !== false) {
+                    $resultadosPpQ[] = $f;
+                }
+                if (count($resultadosPpQ) >= 100) break;
+            }
         } catch (Throwable $e) {
             error_log('UBB RADIUS DHCP: búsqueda general: ' . $e->getMessage());
             $avisoQ = 'No se pudo hacer la búsqueda general.';
@@ -429,15 +446,32 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
     <form class="caja" method="get" action="" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <input type="hidden" name="modulo" value="radius-dhcp">
         <input type="hidden" name="vlan" value="<?= escapar($vlanRd) ?>">
-        <label for="q-general"><b>Buscar en todas las VLAN</b></label>
-        <input id="q-general" name="q" value="<?= escapar($qRd) ?>" placeholder="IP, MAC, cliente o módem (UBB-TP5…)" style="flex:1;min-width:260px">
+        <label for="q-general"><b>Buscar en DHCP y PPPoE</b></label>
+        <input id="q-general" name="q" value="<?= escapar($qRd) ?>" placeholder="IP, MAC, usuario PPPoE, cliente o módem" style="flex:1;min-width:260px">
         <button type="submit" class="b-plan">Buscar</button>
         <?php if ($qRd !== ''): ?><a class="tenue" href="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>">Limpiar</a><?php endif; ?>
     </form>
     <?php if ($avisoQ !== ''): ?><div class="aviso"><?= escapar($avisoQ) ?></div><?php endif; ?>
     <?php if ($qRd !== '' && $avisoQ === ''): ?>
         <section class="caja">
-            <p class="sub" style="margin-top:0"><b><?= count($resultadosQ) ?></b> resultado(s) para «<?= escapar($qRd) ?>» en todas las VLAN<?= count($resultadosQ) >= 100 ? ' (se muestran los primeros 100)' : '' ?>.</p>
+            <p class="sub" style="margin-top:0"><b><?= count($resultadosQ) ?></b> cliente(s) DHCP y <b><?= count($resultadosPpQ) ?></b> cuenta(s) PPPoE para «<?= escapar($qRd) ?>»<?= count($resultadosQ) >= 100 ? ' (DHCP: se muestran los primeros 100)' : '' ?>.</p>
+            <?php if ($resultadosPpQ !== []): ?>
+            <div class="tabla"><table>
+                <thead><tr><th>Tipo</th><th>IP fija</th><th>Usuario PPPoE</th><th>Perfil</th><th>Estado</th><th></th></tr></thead>
+                <tbody>
+                <?php foreach ($resultadosPpQ as $r): $suspR = $r['lista'] === RD_LISTA_DEUDORES; ?>
+                    <tr>
+                        <td data-t="Tipo">PPPoE</td>
+                        <td data-t="IP" class="mono"><b><?= escapar((string) $r['ip']) ?></b></td>
+                        <td data-t="Usuario" class="mono"><?= escapar($r['usuario']) ?></td>
+                        <td data-t="Perfil" class="mono"><?= escapar((string) $r['perfil']) ?></td>
+                        <td data-t="Estado"><span class="pill <?= $suspR ? 'acc-suspender' : 'plan' ?>"><?= $suspR ? 'Suspendido' : 'Activo' ?></span></td>
+                        <td><a class="b-sec" href="?modulo=radius-pppoe&buscar=<?= escapar(rawurlencode($r['usuario'])) ?>">Abrir</a></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table></div>
+            <?php endif; ?>
             <?php if ($resultadosQ !== []): ?>
             <div class="tabla"><table>
                 <thead><tr><th>VLAN</th><th>IP fija</th><th>MAC / módem</th><th>Cliente</th><th>Estado</th><th>Sesión</th><th></th></tr></thead>
