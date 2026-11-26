@@ -9,6 +9,7 @@
  * Uso (dentro del contenedor):
  *   php relacion-pppoe.php          resumen
  *   php relacion-pppoe.php --csv    lista completa (para Excel)
+ *   --sin-inventario                no consulta el inventario de la plataforma (más rápido)
  */
 
 if (PHP_SAPI !== 'cli') {
@@ -69,18 +70,40 @@ foreach ($radius->query("SELECT servicio_id, sitio_id, ip FROM ubb_uisp_mapa WHE
     if (!empty($r['sitio_id'])) $ipsSitio[strtolower((string) $r['sitio_id'])][trim($r['ip'])] = true;
 }
 
-/* 4. RADIUS: cuentas PPPoE por IP */
+/* 4. RADIUS: cuentas PPPoE (por IP, por nombre y por la MAC con que se conectan) */
 $cuentaPorIp = [];
+$cuentaPorNombre = [];
 foreach ($radius->query("SELECT c.username, ip.value AS ip, g.value AS perfil
                          FROM radcheck c
-                         JOIN radreply ip ON ip.username = c.username AND ip.attribute = 'Framed-IP-Address'
+                         LEFT JOIN radreply ip ON ip.username = c.username AND ip.attribute = 'Framed-IP-Address'
                          LEFT JOIN radreply g ON g.username = c.username AND g.attribute = 'Mikrotik-Group'
                          WHERE c.attribute = 'Cleartext-Password'") as $r) {
     if (preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/i', $r['username'])) continue;
-    $cuentaPorIp[trim($r['ip'])][] = $r;
+    $r['ip'] = trim((string) $r['ip']);
+    if ($r['ip'] !== '') $cuentaPorIp[$r['ip']][] = $r;
+    $cuentaPorNombre[strtolower(trim($r['username']))] = $r;
+}
+function rpHex(string $mac): ?int
+{
+    $h = preg_replace('/[^0-9A-Fa-f]/', '', $mac);
+    return strlen($h) === 12 ? hexdec($h) : null;
+}
+$cuentaPorMac = [];   // MAC (como número) -> usuarios PPPoE que se han conectado con ella
+foreach ($radius->query("SELECT DISTINCT username, callingstationid FROM radacct WHERE callingstationid <> ''") as $r) {
+    $u = strtolower(trim($r['username']));
+    $h = rpHex((string) $r['callingstationid']);
+    if ($h !== null && isset($cuentaPorNombre[$u])) $cuentaPorMac[$h][$u] = true;
 }
 
-/* 5. Propuesta */
+/* Pistas de la plataforma por servicio: filas de integracion_winbox aunque no estén RELACIONADO (MAC, hostname, pppoe_name) */
+$pistas = [];
+foreach ($jam->query("SELECT id_servicio, mac, hostname, pppoe_name FROM integracion_winbox WHERE id_servicio IS NOT NULL") as $r) {
+    $pistas[(int) $r['id_servicio']][] = $r;
+}
+$usarInventario = !in_array('--sin-inventario', $argv, true);
+if ($usarInventario) require_once __DIR__ . '/avisos-api.php';
+
+/* 5. Propuesta: cada cuenta candidata junta por qué coincide */
 $filas = [];
 $usoCuenta = [];
 foreach ($servicios as $s) {
@@ -88,13 +111,39 @@ foreach ($servicios as $s) {
     if (isset($conRelacion[$id])) continue;
     $uisp = (int) $s['uisp'];
     $cands = [];
+    $agregar = function (array $cta, string $por) use (&$cands) {
+        $u = $cta['username'];
+        $cands[$u] = ($cands[$u] ?? $cta + ['por' => []]);
+        $cands[$u]['por'][$por] = true;
+    };
+    // a) UISP: IPs del servicio y del sitio
     $ipsDelServicio = $ipsUisp[$uisp] ?? [];
     $ipsDelSitio = $ipsSitio[strtolower((string) $s['sitio'])] ?? [];
-    foreach (array_keys($ipsDelServicio + $ipsDelSitio) as $ip) {
-        foreach ($cuentaPorIp[$ip] ?? [] as $cta) {
-            // por = servicio y sitio coinciden (más seguro) / solo uno de los dos
-            $por = isset($ipsDelServicio[$ip]) && isset($ipsDelSitio[$ip]) ? 'servicio y sitio' : (isset($ipsDelServicio[$ip]) ? 'solo servicio' : 'solo sitio');
-            $cands[$cta['username']] = $cta + ['por' => $por];
+    foreach (array_keys($ipsDelServicio) as $ip) foreach ($cuentaPorIp[$ip] ?? [] as $c) $agregar($c, 'UISP servicio');
+    foreach (array_keys($ipsDelSitio) as $ip) foreach ($cuentaPorIp[$ip] ?? [] as $c) $agregar($c, 'UISP sitio');
+    // b) Nombre y MAC que la plataforma ya tiene para el servicio (importación) y su inventario
+    $nombres = [];
+    $macs = [];
+    foreach ($pistas[$id] ?? [] as $p) {
+        foreach (['pppoe_name', 'hostname'] as $k) if (!empty($p[$k])) $nombres[] = trim((string) $p[$k], " ,");
+        if (!empty($p['mac'])) $macs[] = (string) $p['mac'];
+    }
+    if ($usarInventario && $uisp > 0) {
+        $r = avApi('GET', '/equipos.php?servicio=' . $uisp, 5);
+        $lista = $r['ok'] ? ($r['datos']['equipos'] ?? (isset($r['datos']['equipo']) ? [$r['datos']['equipo']] : [])) : [];
+        foreach ((array) $lista as $e) {
+            if (!empty($e['nombre_red'])) $nombres[] = (string) $e['nombre_red'];
+            if (!empty($e['mac'])) $macs[] = (string) $e['mac'];
+        }
+    }
+    foreach (array_unique($nombres) as $n) {
+        if (isset($cuentaPorNombre[strtolower($n)])) $agregar($cuentaPorNombre[strtolower($n)], 'nombre del módem');
+    }
+    foreach (array_unique($macs) as $m) {
+        $h = rpHex($m);
+        if ($h === null) continue;
+        foreach ([$h, $h - 1, $h + 1] as $hh) {
+            foreach (array_keys($cuentaPorMac[$hh] ?? []) as $u) $agregar($cuentaPorNombre[$u], 'MAC del módem');
         }
     }
     foreach ($cands as $u => $_) $usoCuenta[$u][] = $id;
@@ -103,24 +152,37 @@ foreach ($servicios as $s) {
 $cuenta = ['SEGURO' => 0, 'DUDOSO' => 0, 'SIN CUENTA PPPoE' => 0];
 foreach ($filas as &$f) {
     $n = count($f['cands']);
-    $yaTiene = $n === 1 ? array_keys($duenoCuenta[strtolower($f['cands'][0]['username'])] ?? []) : [];
-    if ($yaTiene !== []) {
+    foreach ($f['cands'] as &$c) {
+        $c['por_txt'] = implode(' + ', array_keys($c['por']));
+    }
+    unset($c);
+    if ($n === 0) {
+        $f['conf'] = 'SIN CUENTA PPPoE';
+        $cuenta[$f['conf']]++;
+        continue;
+    }
+    if ($n > 1) {
         $f['conf'] = 'DUDOSO';
-        $f['nota'] = 'esa cuenta ya está ligada en la plataforma al servicio ' . implode(', ', $yaTiene) . ' (UISP dice este): revisar';
+        $f['nota'] = 'varias cuentas posibles para este servicio';
         $cuenta['DUDOSO']++;
         continue;
     }
-    if ($n === 1 && count($usoCuenta[$f['cands'][0]['username']]) === 1 && $f['uisp'] > 0
-        && ($f['cands'][0]['por'] === 'servicio y sitio' || $colSitio === null)) {
-        $f['conf'] = 'SEGURO';
-    } elseif ($n === 0) {
-        $f['conf'] = 'SIN CUENTA PPPoE';
-    } else {
+    $c = $f['cands'][0];
+    $u = $c['username'];
+    $yaTiene = array_keys($duenoCuenta[strtolower($u)] ?? []);
+    $fuerte = isset($c['por']['nombre del módem']) || isset($c['por']['MAC del módem'])
+        || (isset($c['por']['UISP servicio']) && (isset($c['por']['UISP sitio']) || $colSitio === null));
+    if ($yaTiene !== []) {
         $f['conf'] = 'DUDOSO';
-        $f['nota'] = $n > 1 ? 'varias cuentas para este servicio'
-            : (count($usoCuenta[$f['cands'][0]['username']]) > 1
-                ? 'la cuenta también aparece en otro servicio (' . implode(', ', $usoCuenta[$f['cands'][0]['username']]) . ')'
-                : 'coincide ' . $f['cands'][0]['por'] . ', no los dos');
+        $f['nota'] = 'esa cuenta ya está ligada en la plataforma al servicio ' . implode(', ', $yaTiene) . ': revisar';
+    } elseif (count($usoCuenta[$u]) > 1) {
+        $f['conf'] = 'DUDOSO';
+        $f['nota'] = 'la misma cuenta sale también para el servicio ' . implode(', ', array_diff($usoCuenta[$u], [(int) $f['s']['id_servicio']]));
+    } elseif (!$fuerte) {
+        $f['conf'] = 'DUDOSO';
+        $f['nota'] = 'solo coincide por ' . $c['por_txt'];
+    } else {
+        $f['conf'] = 'SEGURO';
     }
     $cuenta[$f['conf']]++;
 }
@@ -134,21 +196,21 @@ if ($csv) {
             fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], '', '', '', '', ''], ',', '"', '');
         }
         foreach ($f['cands'] as $c) {
-            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], $c['username'], $c['ip'], $c['perfil'], $c['por'], $f['nota'] ?? ''], ',', '"', '');
+            fputcsv($out, [$f['conf'], $f['s']['id_servicio'], $f['s']['cliente'], $f['s']['estado'], $f['s']['tecnologia'], $f['uisp'], $c['username'], $c['ip'], $c['perfil'], $c['por_txt'], $f['nota'] ?? ''], ',', '"', '');
         }
     }
     exit;
 }
 
 echo 'SOLO LECTURA · propuesta de relación servicio -> cuenta PPPoE · ' . date('Y-m-d H:i') . "\n";
-echo "Cruce por uisp_service_id" . ($colSitio ? " y $colSitio (sitio)" : '') . "\n";
+echo "Cruce por UISP (servicio y sitio), nombre del módem y MAC del módem" . ($usarInventario ? ' (con inventario)' : '') . "\n";
 echo 'Servicios en la plataforma: ' . count($servicios) . ' · ya relacionados: ' . count($conRelacion) . ' · sin relación: ' . count($filas) . "\n\n";
 foreach ($cuenta as $k => $n) printf("  %-18s %4d\n", $k, $n);
 echo "\nEjemplos SEGUROS:\n";
 $i = 0;
 foreach ($filas as $f) {
     if ($f['conf'] !== 'SEGURO') continue;
-    printf("  servicio %-6s %-34s -> %-16s %s\n", $f['s']['id_servicio'], mb_substr($f['s']['cliente'], 0, 34), $f['cands'][0]['username'], $f['cands'][0]['ip']);
+    printf("  servicio %-6s %-30s -> %-16s %-12s %s\n", $f['s']['id_servicio'], mb_substr($f['s']['cliente'], 0, 30), $f['cands'][0]['username'], $f['cands'][0]['ip'], $f['cands'][0]['por_txt']);
     if (++$i >= 10) break;
 }
 echo "\nLista completa: php relacion-pppoe.php --csv\n";
