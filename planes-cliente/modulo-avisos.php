@@ -30,7 +30,11 @@ function avDatosCambio(array $a): ?array
 {
     $msg = (string) ($a['mensaje'] ?? '');
     $id = (int) ($a['id_servicio'] ?? 0);
-    if ($id <= 0 && preg_match('/servicio\s*#\s*(\d+)/iu', $msg, $m)) {
+    if ($id <= 0 && preg_match('/^\s*SRV-?\s*(\d+)\s*$/i', (string) ($a['codigo_servicio'] ?? ''), $m)) {
+        $id = (int) $m[1];
+    }
+    // "servicio #1339" o "servicio SRV-1347"
+    if ($id <= 0 && preg_match('/servicio\s*(?:#|SRV-?)\s*(\d+)/iu', $msg, $m)) {
         $id = (int) $m[1];
     }
     if ($id <= 0 || !preg_match('/\bde\s+(\S+)\s+(\d+)\s*Mbps.*?\ba\s+(\S+)\s+(\d+)\s*Mbps/iu', $msg, $m)) {
