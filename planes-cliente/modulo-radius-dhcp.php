@@ -338,6 +338,72 @@ $totalRd = count($clientesRd);
 $suspendidosRd = count(array_filter($clientesRd, fn ($c) => $c['lista'] === RD_LISTA_DEUDORES));
 $enLineaRd = count(array_filter($clientesRd, fn ($c) => !empty($c['sesion_desde'])));
 
+/* ---------- Búsqueda general en todas las VLAN (?q=) ---------- */
+$qRd = trim((string) ($_GET['q'] ?? ''));
+$resultadosQ = [];
+$avisoQ = '';
+if ($qRd !== '' && $pdoRd instanceof PDO) {
+    if (mb_strlen($qRd) < 3) {
+        $avisoQ = 'Escribe al menos 3 caracteres para buscar en todas las VLAN.';
+    } else {
+        $aguja = strtolower($qRd);
+        $agujaMac = preg_replace('/[^0-9a-f]/', '', $aguja);
+        try {
+            $nombresQ = [];
+            try {
+                foreach (obtenerMapaIntegracionDhcp(obtenerPDOJamileth()) as $rel) {
+                    if (!empty($rel['mac'])) {
+                        $nombresQ[strtoupper((string) $rel['mac'])] = (string) ($rel['nombre_cliente'] ?? '');
+                    }
+                }
+            } catch (Throwable $e) {
+                error_log('UBB RADIUS DHCP: búsqueda sin nombres: ' . $e->getMessage());
+            }
+            $modemsQ = [];
+            if (isset($routerVistaRd)) {
+                try {
+                    foreach (rdRouter($routerVistaRd, new Query('/ip/dhcp-server/lease/print')) as $l) {
+                        $m = strtoupper((string) ($l['active-mac-address'] ?? $l['mac-address'] ?? ''));
+                        $h = trim((string) ($l['host-name'] ?? ''), " ,");
+                        if ($m !== '' && $h !== '') {
+                            $modemsQ[$m] = $h;
+                        }
+                    }
+                } catch (Throwable $e) {
+                    error_log('UBB RADIUS DHCP: búsqueda sin módems: ' . $e->getMessage());
+                }
+            }
+            $filasQ = $pdoRd->query("
+                SELECT ip.username AS mac, ip.value AS ip, li.value AS lista,
+                       EXISTS (SELECT 1 FROM radacct a WHERE a.username = ip.username AND a.acctstoptime IS NULL) AS en_linea
+                FROM radreply ip
+                LEFT JOIN radreply li ON li.username = ip.username AND li.attribute = 'Mikrotik-Address-List'
+                WHERE ip.attribute = 'Framed-IP-Address'
+                ORDER BY INET_ATON(ip.value)")->fetchAll();
+            foreach ($filasQ as $f) {
+                $vlanF = null;
+                foreach ($vlansRadiusDhcp as $v => $cfgV) {
+                    if (strpos((string) $f['ip'], $cfgV['prefijo']) === 0) { $vlanF = (string) $v; break; }
+                }
+                if ($vlanF === null) continue;
+                $macF = strtoupper((string) $f['mac']);
+                $nombreF = $nombresQ[$macF] ?? '';
+                $modemF = $modemsQ[$macF] ?? '';
+                $texto = strtolower($f['ip'] . ' ' . $macF . ' ' . $nombreF . ' ' . $modemF);
+                $coincide = strpos($texto, $aguja) !== false
+                    || (strlen($agujaMac) >= 4 && strpos(strtolower(str_replace(':', '', $macF)), $agujaMac) !== false);
+                if ($coincide) {
+                    $resultadosQ[] = $f + ['vlan' => $vlanF, 'nombre' => $nombreF, 'modem' => $modemF];
+                }
+                if (count($resultadosQ) >= 100) break;
+            }
+        } catch (Throwable $e) {
+            error_log('UBB RADIUS DHCP: búsqueda general: ' . $e->getMessage());
+            $avisoQ = 'No se pudo hacer la búsqueda general.';
+        }
+    }
+}
+
 $firmaRd = '';
 if ($pdoRd instanceof PDO) {
     try { $firmaRd = rdFirmaEstado($pdoRd); } catch (Throwable $e) { $firmaRd = ''; }
@@ -359,6 +425,39 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
             <?php if ($globalRd['porPlan'] === []): ?><em>—</em><?php endif; ?>
         </div>
     </section>
+
+    <form class="caja" method="get" action="" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input type="hidden" name="modulo" value="radius-dhcp">
+        <input type="hidden" name="vlan" value="<?= escapar($vlanRd) ?>">
+        <label for="q-general"><b>Buscar en todas las VLAN</b></label>
+        <input id="q-general" name="q" value="<?= escapar($qRd) ?>" placeholder="IP, MAC, cliente o módem (UBB-TP5…)" style="flex:1;min-width:260px">
+        <button type="submit" class="b-plan">Buscar</button>
+        <?php if ($qRd !== ''): ?><a class="tenue" href="?modulo=radius-dhcp&vlan=<?= escapar($vlanRd) ?>">Limpiar</a><?php endif; ?>
+    </form>
+    <?php if ($avisoQ !== ''): ?><div class="aviso"><?= escapar($avisoQ) ?></div><?php endif; ?>
+    <?php if ($qRd !== '' && $avisoQ === ''): ?>
+        <section class="caja">
+            <p class="sub" style="margin-top:0"><b><?= count($resultadosQ) ?></b> resultado(s) para «<?= escapar($qRd) ?>» en todas las VLAN<?= count($resultadosQ) >= 100 ? ' (se muestran los primeros 100)' : '' ?>.</p>
+            <?php if ($resultadosQ !== []): ?>
+            <div class="tabla"><table>
+                <thead><tr><th>VLAN</th><th>IP fija</th><th>MAC / módem</th><th>Cliente</th><th>Estado</th><th>Sesión</th><th></th></tr></thead>
+                <tbody>
+                <?php foreach ($resultadosQ as $r): $suspR = $r['lista'] === RD_LISTA_DEUDORES; ?>
+                    <tr>
+                        <td data-t="VLAN"><?= escapar($r['vlan']) ?></td>
+                        <td data-t="IP" class="mono"><b><?= escapar($r['ip']) ?></b></td>
+                        <td data-t="MAC" class="mono"><?= escapar($r['mac']) ?><?php if ($r['modem'] !== ''): ?><small class="bloque"><?= escapar($r['modem']) ?></small><?php endif; ?></td>
+                        <td data-t="Cliente"><?= $r['nombre'] !== '' ? escapar($r['nombre']) : '<span class="tenue">— sin relación —</span>' ?></td>
+                        <td data-t="Estado"><span class="pill <?= $suspR ? 'acc-suspender' : 'plan' ?>"><?= $suspR ? 'Suspendido' : escapar(strtok((string) $r['lista'], '_') ?: '—') ?></span></td>
+                        <td data-t="Sesión"><?= (int) $r['en_linea'] === 1 ? 'En línea' : '<span class="tenue">Sin sesión</span>' ?></td>
+                        <td><a class="b-sec" href="?modulo=radius-dhcp&vlan=<?= escapar(rawurlencode($r['vlan'])) ?>&buscar=<?= escapar(rawurlencode(strtolower($r['mac']))) ?>">Abrir</a></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table></div>
+            <?php endif; ?>
+        </section>
+    <?php endif; ?>
 
     <nav class="tabs">
         <?php foreach ($vlansRadiusDhcp as $v => $_): ?>
@@ -386,7 +485,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
 
     <section class="caja">
         <div class="barra">
-            <?= portalBuscador('buscar', 'IP, MAC o nombre') ?>
+            <?= portalBuscador('buscar', 'IP, MAC, nombre o módem') ?>
             <select id="f-estado" aria-label="Estado">
                 <option value="">Todos</option>
                 <option value="activo">Activos</option>
