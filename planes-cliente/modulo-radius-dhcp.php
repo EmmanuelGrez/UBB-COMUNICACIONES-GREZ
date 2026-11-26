@@ -347,14 +347,25 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
     if (mb_strlen($qRd) < 3) {
         $avisoQ = 'Escribe al menos 3 caracteres para buscar en todas las VLAN.';
     } else {
-        $aguja = strtolower($qRd);
+        // Sin acentos ni mayúsculas, y cada palabra en cualquier orden ("Corona Sarmiento Andres")
+        $normalizarQ = fn (string $t): string => strtr(mb_strtolower($t), ['á' => 'a', 'é' => 'e', 'í' => 'i', 'ó' => 'o', 'ú' => 'u', 'ü' => 'u', 'ñ' => 'n']);
+        $aguja = $normalizarQ($qRd);
+        $palabrasQ = array_values(array_filter(preg_split('/\s+/', $aguja)));
+        $contieneQ = function (string $texto) use ($palabrasQ, $normalizarQ): bool {
+            $texto = $normalizarQ($texto);
+            foreach ($palabrasQ as $w) {
+                if (strpos($texto, $w) === false) return false;
+            }
+            return true;
+        };
         $agujaMac = preg_replace('/[^0-9a-f]/', '', $aguja);
         try {
             $nombresQ = [];
             try {
-                foreach (obtenerMapaIntegracionDhcp(obtenerPDOJamileth()) as $rel) {
-                    if (!empty($rel['mac'])) {
-                        $nombresQ[strtoupper((string) $rel['mac'])] = (string) ($rel['nombre_cliente'] ?? '');
+                foreach (obtenerMapaIntegracionDhcp(obtenerPDOJamileth()) as $clave => $rel) {
+                    $macRel = strtoupper((string) (explode('|', (string) $clave, 2)[1] ?? ''));
+                    if ($macRel !== '' && ($rel['nombre_cliente'] ?? '') !== '') {
+                        $nombresQ[$macRel] = (string) $rel['nombre_cliente'];
                     }
                 }
             } catch (Throwable $e) {
@@ -390,8 +401,7 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
                 $macF = strtoupper((string) $f['mac']);
                 $nombreF = $nombresQ[$macF] ?? '';
                 $modemF = $modemsQ[$macF] ?? '';
-                $texto = strtolower($f['ip'] . ' ' . $macF . ' ' . $nombreF . ' ' . $modemF);
-                $coincide = strpos($texto, $aguja) !== false
+                $coincide = $contieneQ($f['ip'] . ' ' . $macF . ' ' . $nombreF . ' ' . $modemF)
                     || (strlen($agujaMac) >= 4 && strpos(strtolower(str_replace(':', '', $macF)), $agujaMac) !== false);
                 if ($coincide) {
                     $resultadosQ[] = $f + ['vlan' => $vlanF, 'nombre' => $nombreF, 'modem' => $modemF];
@@ -409,7 +419,7 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
                 WHERE c.attribute = 'Cleartext-Password'");
             foreach ($stPp as $f) {
                 if (preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/i', (string) $f['usuario'])) continue; // DHCP (usuario = MAC)
-                if (strpos(strtolower($f['usuario'] . ' ' . $f['ip']), $aguja) !== false) {
+                if ($contieneQ($f['usuario'] . ' ' . $f['ip'])) {
                     $resultadosPpQ[] = $f;
                 }
                 if (count($resultadosPpQ) >= 100) break;
