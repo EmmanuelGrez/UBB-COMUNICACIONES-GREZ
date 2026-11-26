@@ -211,6 +211,7 @@ if ($pdoRd instanceof PDO) {
         foreach ($clientesRd as &$c) {
             $rel = $mapaJamRd[strtolower($cfgRd['servidor']) . '|' . strtoupper($c['mac'])] ?? null;
             $c['nombre'] = $rel['nombre_cliente'] ?? '';
+            $c['modem'] = (string) ($rel['hostname'] ?? '');
         }
         unset($c);
     } catch (Throwable $e) {
@@ -219,6 +220,7 @@ if ($pdoRd instanceof PDO) {
 }
 
 $planesRd = [];
+$modemRd = [];
 $errorPlanesRd = '';
 $fijasRd = [];
 $errorFijasRd = '';
@@ -227,6 +229,18 @@ try {
     $configPlanesRd['host'] = $cfgRd['router'];
     $routerVistaRd = crearClienteMikrotik($configPlanesRd);
     $planesRd = rdPlanesDisponibles($routerVistaRd, $vlanRd);
+    // Nombre del módem (host-name de su concesión) para poder buscarlo por "UBB-TP5xxxxx"
+    try {
+        foreach (rdRouter($routerVistaRd, (new \RouterOS\Query('/ip/dhcp-server/lease/print'))->where('server', $cfgRd['servidor'])) as $l) {
+            $macL = strtoupper((string) ($l['active-mac-address'] ?? $l['mac-address'] ?? ''));
+            $hostL = trim((string) ($l['host-name'] ?? ''), " ,");
+            if ($macL !== '' && $hostL !== '') {
+                $modemRd[$macL] = $hostL;
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('UBB RADIUS DHCP: sin nombres de módem: ' . $e->getMessage());
+    }
     try {
         foreach (rdConcesionesFijas($routerVistaRd, $cfgRd['servidor']) as $f) {
             $f += ($pdoRd instanceof PDO) ? rdRevisarFija($pdoRd, $cfgRd, $f, $planesRd) : ['plan' => $cfgRd['lista'], 'problema' => 'Sin base RADIUS.'];
@@ -409,10 +423,11 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                 if ($suspendido) $estados[] = $porUisp ? 'susp-uisp' : 'susp-panel';
                 if ($sinRel) $estados[] = 'sinrel';
             ?>
-                <tr data-buscar="<?= escapar(strtolower($c['ip'] . ' ' . $c['mac'] . ' ' . ($c['nombre'] ?? ''))) ?>"
+                <?php $modemC = $modemRd[strtoupper($c['mac'])] ?? ($c['modem'] ?? ''); ?>
+                <tr data-buscar="<?= escapar(strtolower($c['ip'] . ' ' . $c['mac'] . ' ' . ($c['nombre'] ?? '') . ' ' . $modemC)) ?>"
                     data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['lista']) ?>">
                     <td data-t="IP" class="mono"><b><?= escapar($c['ip']) ?></b></td>
-                    <td data-t="MAC" class="mono"><?= escapar($c['mac']) ?></td>
+                    <td data-t="MAC" class="mono"><?= escapar($c['mac']) ?><?php if ($modemC !== ''): ?><small class="bloque"><?= escapar($modemC) ?></small><?php endif; ?></td>
                     <td data-t="Cliente"><?= $sinRel ? '<span class="tenue">— sin relación —</span>' : escapar($c['nombre']) ?>
                         <?php if (count($idsUisp) === 1): ?><small class="bloque">UISP servicio #<?= (int) $idsUisp[0] ?></small>
                         <?php elseif (count($idsUisp) > 1): ?><small class="bloque" style="color:var(--red)">UISP: varios servicios (#<?= escapar(implode(', #', $idsUisp)) ?>)</small><?php endif; ?></td>
