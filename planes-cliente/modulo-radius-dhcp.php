@@ -18,6 +18,7 @@ use RouterOS\Client;
 use RouterOS\Query;
 
 require_once __DIR__ . '/radius-dhcp-acciones.php';
+require_once __DIR__ . '/avisos-api.php'; // inventario de la plataforma (no dar de alta MACs sin registrar)
 
 $vlansRadiusDhcp = rdVlans();
 
@@ -99,6 +100,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             if ($ocupada = $st->fetchColumn()) {
                 throw new RuntimeException("La IP $ip ya está asignada a $ocupada.");
             }
+            $notaInv = avExigirInventario($mac);
             $pdoRd->beginTransaction();
             $pdoRd->prepare("INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Auth-Type', ':=', 'Accept')")
                 ->execute([$mac]);
@@ -107,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             $ins->execute([$mac, 'Mikrotik-Address-List', $cfgRd['lista']]);
             $pdoRd->commit();
             $_SESSION['flash_radius_dhcp_ok'] = "Alta lista: $mac recibirá siempre la IP $ip ("
-                . $cfgRd['lista'] . '). Al conectarse o renovar, el router le dará esa IP.';
+                . $cfgRd['lista'] . '). Al conectarse o renovar, el router le dará esa IP.' . $notaInv;
         } elseif ($accion === 'pasar_radius') {
             // Acción delicada: además de la confirmación pide la clave de acciones.
             $bloqueo = (int) ($_SESSION['clave_rd_bloqueo'] ?? 0);

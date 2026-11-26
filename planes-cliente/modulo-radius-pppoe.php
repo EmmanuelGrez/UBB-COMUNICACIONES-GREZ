@@ -12,6 +12,7 @@ use RouterOS\Client;
 use RouterOS\Query;
 
 require_once __DIR__ . '/radius-dhcp-acciones.php'; // clave de acciones y bitácora (compartidas con DHCP)
+require_once __DIR__ . '/avisos-api.php';          // inventario de la plataforma (no dar de alta MACs sin registrar)
 
 const PP_ROUTER = '10.0.1.6';
 const PP_LISTA_DEUDORES = 'CLIENTES-DEUDORES';
@@ -505,6 +506,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
             // Se revisa otra vez al guardar con los datos del momento, no solo en la pantalla.
             throw new RuntimeException("IP $ip: $motivoIp No se dio de alta.");
         }
+        $notaInv = avExigirInventario((string) ($_POST['mac'] ?? ''));
         $pdoPp->beginTransaction();
         $pdoPp->prepare("INSERT INTO radcheck (username, attribute, op, value) VALUES (?, 'Cleartext-Password', ':=', ?)")
             ->execute([$usuario, $pass]);
@@ -520,7 +522,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
         }
         $_SESSION['flash_radius_pppoe_ok'] = "Alta lista en RADIUS: usuario $usuario, IP fija $ip, perfil $perfil."
             . ($generada ? " Contraseña generada: $pass (anótala para configurar el módem; no se vuelve a mostrar)." : '')
-            . ' Se conectará por RADIUS cuando esté encendido RADIUS para PPPoE en el router.';
+            . ' Se conectará por RADIUS en cuanto el módem tenga ese usuario y contraseña.' . $notaInv;
     } catch (Throwable $e) {
         if ($pdoPp instanceof PDO && $pdoPp->inTransaction()) {
             $pdoPp->rollBack();
