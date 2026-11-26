@@ -106,6 +106,7 @@ if ($usarInventario) require_once __DIR__ . '/avisos-api.php';
 /* 5. Propuesta: cada cuenta candidata junta por qué coincide */
 $filas = [];
 $usoCuenta = [];
+$diag = ['servicios' => 0, 'con_nombre' => 0, 'con_mac' => 0, 'inv_ok' => 0, 'inv_error' => 0, 'inv_ejemplo' => null, 'error_ejemplo' => null, 'nombres_ejemplo' => [], 'macs_ejemplo' => []];
 foreach ($servicios as $s) {
     $id = (int) $s['id_servicio'];
     if (isset($conRelacion[$id])) continue;
@@ -130,12 +131,17 @@ foreach ($servicios as $s) {
     }
     if ($usarInventario && $uisp > 0) {
         $r = avApi('GET', '/equipos.php?servicio=' . $uisp, 5);
+        if ($r['ok']) { $diag['inv_ok']++; $diag['inv_ejemplo'] ??= ['servicio_uisp' => $uisp] + $r['datos']; }
+        else { $diag['inv_error']++; $diag['error_ejemplo'] ??= "servicio_uisp $uisp: " . ($r['error'] ?? ''); }
         $lista = $r['ok'] ? ($r['datos']['equipos'] ?? (isset($r['datos']['equipo']) ? [$r['datos']['equipo']] : [])) : [];
         foreach ((array) $lista as $e) {
             if (!empty($e['nombre_red'])) $nombres[] = (string) $e['nombre_red'];
             if (!empty($e['mac'])) $macs[] = (string) $e['mac'];
         }
     }
+    $diag['servicios']++;
+    if ($nombres) { $diag['con_nombre']++; if (count($diag['nombres_ejemplo']) < 5) $diag['nombres_ejemplo'][] = "$id: " . implode(' / ', array_unique($nombres)); }
+    if ($macs) { $diag['con_mac']++; if (count($diag['macs_ejemplo']) < 5) $diag['macs_ejemplo'][] = "$id: " . implode(' / ', array_unique($macs)); }
     foreach (array_unique($nombres) as $n) {
         if (isset($cuentaPorNombre[strtolower($n)])) $agregar($cuentaPorNombre[strtolower($n)], 'nombre del módem');
     }
@@ -187,6 +193,23 @@ foreach ($filas as &$f) {
     $cuenta[$f['conf']]++;
 }
 unset($f);
+
+if (in_array('--diag', $argv, true)) {
+    echo "DIAGNÓSTICO\n";
+    echo "  Cuentas PPPoE en RADIUS: " . count($cuentaPorNombre) . "\n";
+    echo "  MACs vistas en conexiones PPPoE (radacct): " . count($cuentaPorMac) . "\n";
+    echo "  Servicios sin relación revisados: {$diag['servicios']}\n";
+    echo "  ...con nombre de módem conocido: {$diag['con_nombre']}\n";
+    echo "  ...con MAC conocida: {$diag['con_mac']}\n";
+    echo "  Inventario: {$diag['inv_ok']} respuestas bien, {$diag['inv_error']} con error\n";
+    if ($diag['error_ejemplo']) echo "  Error ejemplo: {$diag['error_ejemplo']}\n";
+    if ($diag['inv_ejemplo']) echo "  Respuesta ejemplo: " . mb_substr(json_encode($diag['inv_ejemplo'], JSON_UNESCAPED_UNICODE), 0, 600) . "\n";
+    foreach ($diag['nombres_ejemplo'] as $x) echo "  nombre  $x\n";
+    foreach ($diag['macs_ejemplo'] as $x) echo "  mac     $x\n";
+    $ej = $radius->query("SELECT username, callingstationid FROM radacct WHERE username NOT LIKE '__:__:__:__:__:__' ORDER BY radacctid DESC LIMIT 3")->fetchAll(PDO::FETCH_NUM);
+    foreach ($ej as $x) echo "  radacct PPPoE: {$x[0]}  MAC={$x[1]}\n";
+    exit;
+}
 
 if ($csv) {
     $out = fopen('php://output', 'w');
