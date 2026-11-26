@@ -73,6 +73,7 @@ foreach ($radius->query("SELECT servicio_id, sitio_id, ip FROM ubb_uisp_mapa WHE
 /* 4. RADIUS: cuentas PPPoE (por IP, por nombre y por la MAC con que se conectan) */
 $cuentaPorIp = [];
 $cuentaPorNombre = [];
+$cuentaPorFinal = [];   // últimos 5 caracteres del nombre (para nombres mal escritos: UBB-TX27F28 = UBB-TPX27F28)
 foreach ($radius->query("SELECT c.username, ip.value AS ip, g.value AS perfil
                          FROM radcheck c
                          LEFT JOIN radreply ip ON ip.username = c.username AND ip.attribute = 'Framed-IP-Address'
@@ -82,6 +83,7 @@ foreach ($radius->query("SELECT c.username, ip.value AS ip, g.value AS perfil
     $r['ip'] = trim((string) $r['ip']);
     if ($r['ip'] !== '') $cuentaPorIp[$r['ip']][] = $r;
     $cuentaPorNombre[strtolower(trim($r['username']))] = $r;
+    if (preg_match('/([0-9a-f]{5})$/i', trim($r['username']), $m)) $cuentaPorFinal[strtolower($m[1])][] = $r;
 }
 function rpHex(string $mac): ?int
 {
@@ -143,7 +145,11 @@ foreach ($servicios as $s) {
     if ($nombres) { $diag['con_nombre']++; if (count($diag['nombres_ejemplo']) < 5) $diag['nombres_ejemplo'][] = "$id: " . implode(' / ', array_unique($nombres)); }
     if ($macs) { $diag['con_mac']++; if (count($diag['macs_ejemplo']) < 5) $diag['macs_ejemplo'][] = "$id: " . implode(' / ', array_unique($macs)); }
     foreach (array_unique($nombres) as $n) {
-        if (isset($cuentaPorNombre[strtolower($n)])) $agregar($cuentaPorNombre[strtolower($n)], 'nombre del módem');
+        if (isset($cuentaPorNombre[strtolower($n)])) {
+            $agregar($cuentaPorNombre[strtolower($n)], 'nombre del módem');
+        } elseif (stripos($n, 'UBB-') === 0 && preg_match('/([0-9a-f]{5})$/i', $n, $m)) {
+            foreach ($cuentaPorFinal[strtolower($m[1])] ?? [] as $c) $agregar($c, "nombre parecido ($n)");
+        }
     }
     foreach (array_unique($macs) as $m) {
         $h = rpHex($m);
