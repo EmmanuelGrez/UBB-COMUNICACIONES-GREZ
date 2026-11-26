@@ -82,6 +82,17 @@ function idsDeudor(Client $router, string $ip): array
     return array_values(array_filter(array_map(fn ($f) => (string) ($f['.id'] ?? ''), $filas)));
 }
 
+/** Deja constancia en la bitácora (fecha y hora la pone la base). Nunca detiene la sincronización. */
+function anotar(PDO $pdo, string $mac, string $ip, string $accion, string $detalle): void
+{
+    try {
+        $pdo->prepare("INSERT INTO ubb_bitacora (mac, ip, accion, detalle, origen) VALUES (?, ?, ?, ?, 'UISP')")
+            ->execute([$mac, $ip, $accion, $detalle]);
+    } catch (Throwable $e) {
+        salida('AVISO: no se pudo anotar en la bitácora: ' . $e->getMessage());
+    }
+}
+
 function quitarConcesion(Client $router, string $mac): void
 {
     foreach (ros($router, (new Query('/ip/dhcp-server/lease/print'))->where('mac-address', $mac)) as $f) {
@@ -170,6 +181,7 @@ try {
             ->execute([LISTA_DEUDORES, $c['mac']]);
         $pdo->commit();
         quitarConcesion($router, $c['mac']);
+        anotar($pdo, $c['mac'], $c['ip'], 'suspender', 'UISP lo bloqueó (pago), estaba ' . $c['lista']);
     }
 
     foreach ($reactivar as $c) {
@@ -189,6 +201,7 @@ try {
         }
         quitarConcesion($router, $c['mac']);
         $pdo->prepare("DELETE FROM ubb_suspensiones WHERE username = ?")->execute([$c['mac']]);
+        anotar($pdo, $c['mac'], $c['ip'], 'reactivar', 'UISP lo desbloqueó, vuelve a ' . $original);
     }
 } catch (Throwable $e) {
     if (isset($pdo) && $pdo->inTransaction()) {
