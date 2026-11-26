@@ -4,7 +4,7 @@
  *
  *   GET  /api-radius/v1/salud
  *   GET  /api-radius/v1/servicios                 lista con estado (todos los relacionados, o ?ids=1,2,3)
- *   GET  /api-radius/v1/servicios/{id_servicio}
+ *   GET  /api-radius/v1/servicios/{id_servicio}     (DHCP o PPPoE; tipo DHCP|PPPOE, usuario en PPPoE)
  *   POST /api-radius/v1/servicios/{id_servicio}/suspender
  *   POST /api-radius/v1/servicios/{id_servicio}/reactivar
  *
@@ -178,10 +178,22 @@ function apiBuscarEquipo(PDO $radius, int $idServicio): array
     foreach ($st->fetchAll() as $f) {
         $equipos[strtoupper(trim((string) $f['servidor_dhcp'])) . '|' . strtoupper(trim((string) $f['mac']))] = $f;
     }
+    if (count($equipos) === 0) {
+        // Sin equipo DHCP: ¿tiene cuenta PPPoE relacionada?
+        $st = $jam->prepare("SELECT DISTINCT LOWER(TRIM(pppoe_name)) FROM integracion_winbox
+                             WHERE id_servicio = ? AND id_cliente = ? AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%'
+                               AND pppoe_name IS NOT NULL AND TRIM(pppoe_name) <> ''");
+        $st->execute([$idServicio, $servicio['id_cliente']]);
+        $cuentas = $st->fetchAll(PDO::FETCH_COLUMN);
+        if (count($cuentas) === 1) {
+            return apiEquipoPppoe($radius, $idServicio, (string) $cuentas[0]);
+        }
+        throw new ApiError(409, 'SIN_RELACION', count($cuentas) === 0
+            ? "El servicio $idServicio no tiene un equipo relacionado (ni DHCP ni PPPoE)."
+            : "El servicio $idServicio tiene varias cuentas PPPoE relacionadas; no se hace nada para no afectar al equivocado.");
+    }
     if (count($equipos) !== 1) {
-        throw new ApiError(409, 'SIN_RELACION', count($equipos) === 0
-            ? "El servicio $idServicio no tiene un equipo DHCP relacionado."
-            : "El servicio $idServicio tiene varios equipos relacionados; no se hace nada para no afectar al equivocado.");
+        throw new ApiError(409, 'SIN_RELACION', "El servicio $idServicio tiene varios equipos relacionados; no se hace nada para no afectar al equivocado.");
     }
     $fila = reset($equipos);
     $cfg = rdVlanPorServidor((string) $fila['servidor_dhcp']);
@@ -200,9 +212,56 @@ function apiBuscarEquipo(PDO $radius, int $idServicio): array
     return ['mac' => $mac, 'ip' => $cliente['ip'], 'lista' => $cliente['lista'], 'cfg' => $cfg, 'tipo' => 'DHCP'];
 }
 
+/**
+ * Cuenta PPPoE de un servicio (por su usuario en integracion_winbox). Devuelve lo mismo que un DHCP,
+ * con 'tipo' => 'PPPOE', 'usuario', 'perfil' (Mikrotik-Group) y la última MAC con la que se conectó.
+ */
+function apiEquipoPppoe(PDO $radius, int $idServicio, string $cuenta): array
+{
+    $st = $radius->prepare("SELECT username FROM radcheck WHERE LOWER(username) = ? AND attribute = 'Cleartext-Password'");
+    $st->execute([strtolower($cuenta)]);
+    $usuarios = $st->fetchAll(PDO::FETCH_COLUMN);
+    if (count($usuarios) !== 1) {
+        throw new ApiError(409, 'SIN_RELACION', "La cuenta PPPoE del servicio $idServicio ($cuenta) no está dada de alta en RADIUS.");
+    }
+    $usuario = (string) $usuarios[0];
+    $datos = [];
+    $st = $radius->prepare("SELECT attribute, value FROM radreply WHERE username = ?");
+    $st->execute([$usuario]);
+    foreach ($st->fetchAll() as $f) {
+        $datos[(string) $f['attribute']] = (string) $f['value'];
+    }
+    $st = $radius->prepare("SELECT callingstationid FROM radacct WHERE username = ? AND callingstationid <> '' ORDER BY radacctid DESC LIMIT 1");
+    $st->execute([$usuario]);
+    $mac = strtoupper(str_replace('-', ':', trim((string) $st->fetchColumn())));
+    return [
+        'tipo' => 'PPPOE',
+        'usuario' => $usuario,
+        'mac' => preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/', $mac) ? $mac : null,
+        'ip' => $datos['Framed-IP-Address'] ?? null,
+        'lista' => $datos['Mikrotik-Address-List'] ?? '',
+        'perfil' => $datos['Mikrotik-Group'] ?? '',
+        'cfg' => ['vlan' => null],
+    ];
+}
+
 /** Estado y plan actuales del equipo (el plan de un suspendido es el que tenía guardado). */
 function apiEstado(PDO $radius, array $eq): array
 {
+    if (($eq['tipo'] ?? '') === 'PPPOE') {
+        $suspendido = $eq['lista'] === RD_LISTA_DEUDORES;
+        $plan = $eq['perfil'];
+        $origen = null;
+        if ($suspendido) {
+            $st = $radius->prepare('SELECT lista_original, origen FROM ubb_suspensiones WHERE username = ?');
+            $st->execute([$eq['usuario']]);
+            $s = $st->fetch() ?: [];
+            $guardado = preg_replace('/^perfil\s+/i', '', (string) ($s['lista_original'] ?? ''));
+            $plan = $guardado !== '' ? $guardado : $plan;
+            $origen = strtoupper((string) ($s['origen'] ?? 'PANEL'));
+        }
+        return ['estado' => $suspendido ? 'SUSPENDIDO' : 'ACTIVO', 'plan' => $plan, 'suspendido_por' => $origen];
+    }
     $suspendido = $eq['lista'] === RD_LISTA_DEUDORES;
     $plan = $eq['lista'];
     $origen = null;
@@ -294,7 +353,8 @@ try {
             try {
                 $ids = array_map('intval', apiPdoJamileth()->query(
                     "SELECT DISTINCT id_servicio FROM integracion_winbox
-                     WHERE tipo_fuente = 'DHCP' AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND id_servicio IS NOT NULL
+                     WHERE UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND id_servicio IS NOT NULL
+                       AND (tipo_fuente = 'DHCP' OR (pppoe_name IS NOT NULL AND TRIM(pppoe_name) <> ''))
                      ORDER BY id_servicio")->fetchAll(PDO::FETCH_COLUMN));
             } catch (Throwable $e) {
                 error_log('API RADIUS: sin lista de UBB Pagos: ' . $e->getMessage());
@@ -326,6 +386,7 @@ try {
                     'tipo' => $eq['tipo'],
                     'ip' => $eq['ip'],
                     'mac' => $eq['mac'],
+                    'usuario' => $eq['usuario'] ?? null,
                     'plan' => $estado['plan'],
                     'vlan' => $eq['cfg']['vlan'],
                 ];
@@ -380,6 +441,7 @@ try {
             'tipo' => $eq['tipo'],
             'ip' => $eq['ip'],
             'mac' => $eq['mac'],
+            'usuario' => $eq['usuario'] ?? null,
             'plan' => $estado['plan'],
             'vlan' => $eq['cfg']['vlan'],
             'mensaje' => 'Consulta sin cambios.',
@@ -422,6 +484,9 @@ try {
     }
 
     $eq = apiBuscarEquipo($apiPdo, $idServicio);
+    if ($eq['tipo'] === 'PPPOE') {
+        throw new ApiError(409, 'NO_APLICADO', 'Suspender o reactivar clientes PPPoE por la API todavía no está habilitado; por ahora se hace desde el panel. No se cambió nada.');
+    }
     $antes = apiEstado($apiPdo, $eq);
     $quiere = $accion === 'suspender' ? 'SUSPENDIDO' : 'ACTIVO';
     $base = [
