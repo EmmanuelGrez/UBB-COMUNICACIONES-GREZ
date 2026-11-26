@@ -62,6 +62,34 @@ foreach ($jam->query("SELECT LOWER(TRIM(pppoe_name)) AS u, id_servicio FROM inte
     $duenoCuenta[$r['u']][(int) $r['id_servicio']] = true;
 }
 
+/* --conteo: cuántas cuentas PPPoE de RADIUS están ligadas a un servicio en la plataforma */
+if (in_array('--conteo', $argv, true)) {
+    $cuentas = [];
+    foreach ($radius->query("SELECT DISTINCT username FROM radcheck WHERE attribute = 'Cleartext-Password'") as $r) {
+        if (!preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/i', $r['username'])) $cuentas[strtolower(trim($r['username']))] = $r['username'];
+    }
+    $conectadas = [];
+    foreach ($radius->query("SELECT DISTINCT username FROM radacct WHERE acctstoptime IS NULL") as $r) $conectadas[strtolower(trim($r['username']))] = true;
+    $susp = [];
+    foreach ($radius->query("SELECT username FROM ubb_suspensiones") as $r) $susp[strtolower(trim($r['username']))] = true;
+    $ligadas = array_intersect_key($cuentas, $duenoCuenta);
+    $sueltas = array_diff_key($cuentas, $duenoCuenta);
+    $noExisten = array_diff_key($duenoCuenta, $cuentas);
+    $sueltasCon = array_intersect_key($sueltas, $conectadas);
+    echo "SOLO LECTURA · cuentas PPPoE · " . date('Y-m-d H:i') . "\n";
+    echo "  Cuentas PPPoE en RADIUS:                 " . count($cuentas) . "\n";
+    echo "  Ligadas a un servicio en la plataforma:  " . count($ligadas) . "   (conectadas ahora: " . count(array_intersect_key($ligadas, $conectadas)) . ")\n";
+    echo "  SIN ligar:                               " . count($sueltas) . "   (conectadas ahora: " . count($sueltasCon) . ", suspendidas: " . count(array_intersect_key($sueltas, $susp)) . ")\n";
+    echo "  Ligadas en la plataforma pero que no existen en RADIUS: " . count($noExisten) . "\n";
+    if (in_array('--lista', $argv, true)) {
+        echo "\nSin ligar y CONECTADAS ahora (usan internet y no tienen servicio en la plataforma):\n";
+        foreach ($sueltasCon as $u) echo "  $u\n";
+        echo "\nLigadas en la plataforma pero sin cuenta en RADIUS:\n";
+        foreach ($noExisten as $u => $ids) echo "  $u -> servicio " . implode(', ', array_keys($ids)) . "\n";
+    }
+    exit;
+}
+
 /* 3. UISP: IPs de cada servicio */
 $ipsUisp = [];
 $ipsSitio = [];
