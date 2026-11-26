@@ -54,6 +54,13 @@ foreach ($jam->query("SELECT DISTINCT id_servicio FROM integracion_winbox
     $conRelacion[(int) $r['id_servicio']] = true;
 }
 
+/* Cuentas PPPoE que ya tienen dueño en la plataforma (no se proponen a otro servicio) */
+$duenoCuenta = [];
+foreach ($jam->query("SELECT LOWER(TRIM(pppoe_name)) AS u, id_servicio FROM integracion_winbox
+                      WHERE UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND pppoe_name IS NOT NULL AND TRIM(pppoe_name) <> ''") as $r) {
+    $duenoCuenta[$r['u']][(int) $r['id_servicio']] = true;
+}
+
 /* 3. UISP: IPs de cada servicio */
 $ipsUisp = [];
 $ipsSitio = [];
@@ -96,6 +103,13 @@ foreach ($servicios as $s) {
 $cuenta = ['SEGURO' => 0, 'DUDOSO' => 0, 'SIN CUENTA PPPoE' => 0];
 foreach ($filas as &$f) {
     $n = count($f['cands']);
+    $yaTiene = $n === 1 ? array_keys($duenoCuenta[strtolower($f['cands'][0]['username'])] ?? []) : [];
+    if ($yaTiene !== []) {
+        $f['conf'] = 'DUDOSO';
+        $f['nota'] = 'esa cuenta ya está ligada en la plataforma al servicio ' . implode(', ', $yaTiene) . ' (UISP dice este): revisar';
+        $cuenta['DUDOSO']++;
+        continue;
+    }
     if ($n === 1 && count($usoCuenta[$f['cands'][0]['username']]) === 1 && $f['uisp'] > 0
         && ($f['cands'][0]['por'] === 'servicio y sitio' || $colSitio === null)) {
         $f['conf'] = 'SEGURO';
