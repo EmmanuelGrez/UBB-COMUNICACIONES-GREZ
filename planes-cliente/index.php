@@ -511,6 +511,36 @@ function obtenerMapaEstadoPppoe(PDO $pdoJamileth): array
     return $mapa;
 }
 
+/**
+ * Cuenta PPPoE -> servicio y cliente según la plataforma de Jamileth (solo RELACIONADO, solo lectura).
+ * Si una cuenta aparece en varios servicios, 'servicio' trae todos separados por coma.
+ */
+function obtenerServiciosPppoe(PDO $pdoJamileth): array
+{
+    $sql = "SELECT LOWER(TRIM(i.pppoe_name)) AS cuenta, i.id_servicio,
+                   CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno) AS nombre
+            FROM integracion_winbox i
+            JOIN servicios s ON s.id_servicio = i.id_servicio AND s.id_cliente = i.id_cliente
+            JOIN clientes c ON c.id_cliente = i.id_cliente
+            WHERE UPPER(i.estado_vinculacion) LIKE 'RELACIONADO%'
+              AND i.pppoe_name IS NOT NULL AND TRIM(i.pppoe_name) <> ''";
+    $mapa = [];
+    foreach ($pdoJamileth->query($sql) as $f) {
+        $cuenta = (string) $f['cuenta'];
+        $mapa[$cuenta]['servicios'][(string) $f['id_servicio']] = true;
+        $mapa[$cuenta]['nombre'] = $mapa[$cuenta]['nombre'] ?? (string) $f['nombre'];
+    }
+    foreach ($mapa as &$m) {
+        $m['servicio'] = implode(', ', array_keys($m['servicios']));
+        if (count($m['servicios']) > 1) {
+            $m['nombre'] = 'Varios servicios';
+        }
+        unset($m['servicios']);
+    }
+    unset($m);
+    return $mapa;
+}
+
 /*
  * Recupera la integración DHCP desde Jamileth en modo de solo lectura.
  * La clave técnica es servidor DHCP + MAC; la MAC por sí sola no es única

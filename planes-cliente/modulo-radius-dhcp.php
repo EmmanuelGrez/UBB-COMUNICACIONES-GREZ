@@ -213,6 +213,7 @@ if ($pdoRd instanceof PDO) {
         foreach ($clientesRd as &$c) {
             $rel = $mapaJamRd[strtolower($cfgRd['servidor']) . '|' . strtoupper($c['mac'])] ?? null;
             $c['nombre'] = $rel['nombre_cliente'] ?? '';
+            $c['servicio'] = (string) ($rel['id_servicio'] ?? '');
             $c['modem'] = (string) ($rel['hostname'] ?? '');
         }
         unset($c);
@@ -363,11 +364,19 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
         $agujaMac = preg_replace('/[^0-9a-f]/', '', $aguja);
         try {
             $nombresQ = [];
+            $serviciosQ = [];
+            $serviciosPpQ = [];
+            try {
+                $serviciosPpQ = obtenerServiciosPppoe(obtenerPDOJamileth());
+            } catch (Throwable $e) {
+                error_log('UBB RADIUS DHCP: búsqueda sin servicios PPPoE: ' . $e->getMessage());
+            }
             try {
                 foreach (obtenerMapaIntegracionDhcp(obtenerPDOJamileth()) as $clave => $rel) {
                     $macRel = strtoupper((string) (explode('|', (string) $clave, 2)[1] ?? ''));
                     if ($macRel !== '' && ($rel['nombre_cliente'] ?? '') !== '') {
                         $nombresQ[$macRel] = (string) $rel['nombre_cliente'];
+                        $serviciosQ[$macRel] = (string) ($rel['id_servicio'] ?? '');
                     }
                 }
             } catch (Throwable $e) {
@@ -402,11 +411,13 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
                 if ($vlanF === null) continue;
                 $macF = strtoupper((string) $f['mac']);
                 $nombreF = $nombresQ[$macF] ?? '';
+                $servicioF = $serviciosQ[$macF] ?? '';
                 $modemF = $modemsQ[$macF] ?? '';
                 $coincide = $contieneQ($f['ip'] . ' ' . $macF . ' ' . $nombreF . ' ' . $modemF)
+                    || ($servicioF !== '' && trim($aguja) === $servicioF)
                     || (strlen($agujaMac) >= 4 && strpos(strtolower(str_replace(':', '', $macF)), $agujaMac) !== false);
                 if ($coincide) {
-                    $resultadosQ[] = $f + ['vlan' => $vlanF, 'nombre' => $nombreF, 'modem' => $modemF];
+                    $resultadosQ[] = $f + ['vlan' => $vlanF, 'nombre' => $nombreF, 'servicio' => $servicioF, 'modem' => $modemF];
                 }
                 if (count($resultadosQ) >= 100) break;
             }
@@ -421,7 +432,11 @@ if ($qRd !== '' && $pdoRd instanceof PDO) {
                 WHERE c.attribute = 'Cleartext-Password'");
             foreach ($stPp as $f) {
                 if (preg_match('/^(?:[0-9A-F]{2}:){5}[0-9A-F]{2}$/i', (string) $f['usuario'])) continue; // DHCP (usuario = MAC)
-                if ($contieneQ($f['usuario'] . ' ' . $f['ip'])) {
+                $relPp = $serviciosPpQ[strtolower((string) $f['usuario'])] ?? null;
+                $f['servicio'] = (string) ($relPp['servicio'] ?? '');
+                $f['nombre'] = (string) ($relPp['nombre'] ?? '');
+                if ($contieneQ($f['usuario'] . ' ' . $f['ip'] . ' ' . $f['nombre'])
+                    || ($f['servicio'] !== '' && in_array(trim($aguja), array_map('trim', explode(',', $f['servicio'])), true))) {
                     $resultadosPpQ[] = $f;
                 }
                 if (count($resultadosPpQ) >= 100) break;
@@ -469,13 +484,14 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
             <p class="sub" style="margin-top:0"><b><?= count($resultadosQ) ?></b> cliente(s) DHCP y <b><?= count($resultadosPpQ) ?></b> cuenta(s) PPPoE para «<?= escapar($qRd) ?>»<?= count($resultadosQ) >= 100 ? ' (DHCP: se muestran los primeros 100)' : '' ?>.</p>
             <?php if ($resultadosPpQ !== []): ?>
             <div class="tabla"><table>
-                <thead><tr><th>Tipo</th><th>IP fija</th><th>Usuario PPPoE</th><th>Perfil</th><th>Estado</th><th></th></tr></thead>
+                <thead><tr><th>Tipo</th><th>IP fija</th><th>Usuario PPPoE</th><th>Cliente</th><th>Perfil</th><th>Estado</th><th></th></tr></thead>
                 <tbody>
                 <?php foreach ($resultadosPpQ as $r): $suspR = $r['lista'] === RD_LISTA_DEUDORES; ?>
                     <tr>
                         <td data-t="Tipo">PPPoE</td>
                         <td data-t="IP" class="mono"><b><?= escapar((string) $r['ip']) ?></b></td>
                         <td data-t="Usuario" class="mono"><?= escapar($r['usuario']) ?></td>
+                        <td data-t="Cliente"><?= $r['nombre'] !== '' ? escapar($r['nombre']) . '<small class="bloque">Servicio ' . escapar($r['servicio']) . '</small>' : '<span class="tenue">— sin relación —</span>' ?></td>
                         <td data-t="Perfil" class="mono"><?= escapar((string) $r['perfil']) ?></td>
                         <td data-t="Estado"><span class="pill <?= $suspR ? 'acc-suspender' : 'plan' ?>"><?= $suspR ? 'Suspendido' : 'Activo' ?></span></td>
                         <td><a class="b-sec" href="?modulo=radius-pppoe&buscar=<?= escapar(rawurlencode($r['usuario'])) ?>">Abrir</a></td>
@@ -493,7 +509,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                         <td data-t="VLAN"><?= escapar($r['vlan']) ?></td>
                         <td data-t="IP" class="mono"><b><?= escapar($r['ip']) ?></b></td>
                         <td data-t="MAC" class="mono"><?= escapar($r['mac']) ?><?php if ($r['modem'] !== ''): ?><small class="bloque"><?= escapar($r['modem']) ?></small><?php endif; ?></td>
-                        <td data-t="Cliente"><?= $r['nombre'] !== '' ? escapar($r['nombre']) : '<span class="tenue">— sin relación —</span>' ?></td>
+                        <td data-t="Cliente"><?= $r['nombre'] !== '' ? escapar($r['nombre']) . (($r['servicio'] ?? '') !== '' ? '<small class="bloque">Servicio ' . escapar($r['servicio']) . '</small>' : '') : '<span class="tenue">— sin relación —</span>' ?></td>
                         <td data-t="Estado"><span class="pill <?= $suspR ? 'acc-suspender' : 'plan' ?>"><?= $suspR ? 'Suspendido' : escapar(strtok((string) $r['lista'], '_') ?: '—') ?></span></td>
                         <td data-t="Sesión"><?= (int) $r['en_linea'] === 1 ? 'En línea' : '<span class="tenue">Sin sesión</span>' ?></td>
                         <td><a class="b-sec" href="?modulo=radius-dhcp&vlan=<?= escapar(rawurlencode($r['vlan'])) ?>&buscar=<?= escapar(rawurlencode(strtolower($r['mac']))) ?>">Abrir</a></td>
@@ -569,11 +585,12 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                 if ($sinRel) $estados[] = 'sinrel';
             ?>
                 <?php $modemC = $modemRd[strtoupper($c['mac'])] ?? ($c['modem'] ?? ''); ?>
-                <tr data-buscar="<?= escapar(strtolower($c['ip'] . ' ' . $c['mac'] . ' ' . ($c['nombre'] ?? '') . ' ' . $modemC)) ?>"
+                <tr data-buscar="<?= escapar(strtolower($c['ip'] . ' ' . $c['mac'] . ' ' . ($c['nombre'] ?? '') . ' ' . $modemC . ' ' . ($c['servicio'] ?? ''))) ?>"
                     data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['lista']) ?>">
                     <td data-t="IP" class="mono"><b><?= escapar($c['ip']) ?></b></td>
                     <td data-t="MAC" class="mono"><?= escapar($c['mac']) ?><?php if ($modemC !== ''): ?><small class="bloque"><?= escapar($modemC) ?></small><?php endif; ?></td>
                     <td data-t="Cliente"><?= $sinRel ? '<span class="tenue">— sin relación —</span>' : escapar($c['nombre']) ?>
+                        <?php if (($c['servicio'] ?? '') !== ''): ?><small class="bloque"><b>Servicio <?= escapar($c['servicio']) ?></b></small><?php endif; ?>
                         <?php if (count($idsUisp) === 1): ?><small class="bloque">UISP servicio #<?= (int) $idsUisp[0] ?></small>
                         <?php elseif (count($idsUisp) > 1): ?><small class="bloque" style="color:var(--red)">UISP: varios servicios (#<?= escapar(implode(', #', $idsUisp)) ?>)</small><?php endif; ?></td>
                     <td data-t="Estado">
