@@ -151,6 +151,7 @@ a{color:var(--plum-3)}
 .mensaje,.error,.aviso,.fase{padding:12px 16px;border-radius:12px;margin-bottom:14px;font-size:14px;border:1px solid var(--line);border-left:4px solid var(--plum-3);background:var(--surface)}
 .mensaje{border-left-color:var(--green);background:var(--green-soft);color:#185b31}
 .error{border-left-color:var(--red);background:var(--red-soft);color:#8a2424}
+.aviso-uisp{border:2px solid var(--red);border-left-width:6px;font-size:15px;font-weight:600}
 .aviso{border-left-color:#d49a2a;background:var(--amber-soft);color:#6b4e00}
 .fase{background:var(--lavender-pale);color:var(--plum-2)}
 /* Barra de búsqueda y filtros */

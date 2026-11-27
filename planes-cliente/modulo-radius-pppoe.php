@@ -187,7 +187,8 @@ if (!is_string($csrfPp) || $csrfPp === '') {
 }
 $flashPpOk = $_SESSION['flash_radius_pppoe_ok'] ?? '';
 $flashPpError = $_SESSION['flash_radius_pppoe_error'] ?? '';
-unset($_SESSION['flash_radius_pppoe_ok'], $_SESSION['flash_radius_pppoe_error']);
+$flashPpUisp = (string) ($_SESSION['flash_radius_pppoe_uisp'] ?? '');
+unset($_SESSION['flash_radius_pppoe_ok'], $_SESSION['flash_radius_pppoe_error'], $_SESSION['flash_radius_pppoe_uisp']);
 
 try {
     $configRouterPp = $mikrotikConfig;
@@ -454,8 +455,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['
             rdBitacora($pdoPp, $u, $ip, 'cambiar_plan', "PPPoE, $anterior -> $perfil", 'PANEL');
             rdAvisarMonitoreo($pdoPp, 'CAMBIO_PLAN', ['usuario' => $u], 'Cambio de ' . ppPlan($anterior) . ' a ' . ppPlan($perfil), 'PANEL', $ip);
             $_SESSION['flash_radius_pppoe_ok'] = "Plan cambiado: $u ahora tiene $perfil. "
-                . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'))
-                . rdUispCambiarPlan($pdoPp, $routerPp, (string) ($cli['mac'] ?? ''), (string) $ip, $u, $perfil);
+                . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'));
+            $uispPp = rdUispCambiarPlan($pdoPp, $routerPp, (string) ($cli['mac'] ?? ''), (string) $ip, $u, $perfil);
+            if (strpos($uispPp, '⚠') !== false) {
+                $_SESSION['flash_radius_pppoe_uisp'] = trim($uispPp); // en rojo: hay que cambiarlo a mano en UISP
+            } else {
+                $_SESSION['flash_radius_pppoe_ok'] .= $uispPp;
+            }
         }
     } catch (Throwable $e) {
         if ($pdoPp instanceof PDO && $pdoPp->inTransaction()) {
@@ -583,6 +589,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     <?php if ($errorPp !== ''): ?><div class="error"><?= escapar($errorPp) ?></div><?php endif; ?>
     <?php if ($flashPpOk !== ''): ?><div class="ok"><?= escapar($flashPpOk) ?></div><?php endif; ?>
     <?php if ($flashPpError !== ''): ?><div class="error"><?= escapar($flashPpError) ?></div><?php endif; ?>
+    <?php if ($flashPpUisp !== ''): ?><div class="error aviso-uisp" role="alert"><b>PENDIENTE EN UISP:</b> <?= escapar($flashPpUisp) ?></div><?php endif; ?>
 
     <?php
     // Viene de "Avisos de equipos": modelo y MAC ya llenos.

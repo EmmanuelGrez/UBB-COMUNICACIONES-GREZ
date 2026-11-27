@@ -36,7 +36,8 @@ if (!is_string($csrfRd) || $csrfRd === '') {
 
 $mensajeRd = (string) ($_SESSION['flash_radius_dhcp_ok'] ?? '');
 $errorRd = (string) ($_SESSION['flash_radius_dhcp_error'] ?? '');
-unset($_SESSION['flash_radius_dhcp_ok'], $_SESSION['flash_radius_dhcp_error']);
+$avisoUispRd = (string) ($_SESSION['flash_radius_dhcp_uisp'] ?? '');
+unset($_SESSION['flash_radius_dhcp_ok'], $_SESSION['flash_radius_dhcp_error'], $_SESSION['flash_radius_dhcp_uisp']);
 
 /* ---------- Conexión a la base radius ---------- */
 
@@ -160,7 +161,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             $router = crearClienteMikrotik($configRouter);
             $planNuevoRd = (string) ($_POST['plan'] ?? '');
             $mensajeRd = rdCambiarPlan($pdoRd, $router, $cfgRd + ['vlan' => $vlanRd], $mac, $planNuevoRd);
-            $mensajeRd .= rdUispCambiarPlan($pdoRd, $router, $mac, rdLeerCliente($pdoRd, $mac)['ip'], '', $planNuevoRd);
+            $uispRd = rdUispCambiarPlan($pdoRd, $router, $mac, rdLeerCliente($pdoRd, $mac)['ip'], '', $planNuevoRd);
+            if (strpos($uispRd, '⚠') !== false) {
+                $_SESSION['flash_radius_dhcp_uisp'] = trim($uispRd); // en rojo: hay que cambiarlo a mano en UISP
+            } else {
+                $mensajeRd .= $uispRd;
+            }
             $_SESSION['flash_radius_dhcp_ok'] = $mensajeRd;
         } else {
             throw new RuntimeException('Operación no reconocida.');
@@ -533,6 +539,7 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
 
     <?php if ($mensajeRd !== ''): ?><div class="mensaje"><?= escapar($mensajeRd) ?></div><?php endif; ?>
     <?php if ($errorRd !== ''): ?><div class="error"><?= escapar($errorRd) ?></div><?php endif; ?>
+    <?php if ($avisoUispRd !== ''): ?><div class="error aviso-uisp" role="alert"><b>PENDIENTE EN UISP:</b> <?= escapar($avisoUispRd) ?></div><?php endif; ?>
     <?php if ($pdoRd instanceof PDO && !$tablaSuspensionesRd): ?>
         <div class="aviso">Falta la tabla <b>radius.ubb_suspensiones</b>: se puede consultar y dar de alta, pero los botones de suspender no funcionarán hasta crearla.</div>
     <?php endif; ?>
