@@ -8,7 +8,8 @@ $ipCliente = htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '', ENT_QUOTES, 'UTF-8'
 $whatsappNumero  = '522382114997';
 $whatsappMensaje = 'Hola, quiero reactivar mi servicio de internet.'
                  . ($ipCliente !== '' ? ' Mi referencia es ' . $ipCliente . '.' : '');
-$whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode($whatsappMensaje);
+// Abre la aplicación de WhatsApp directo (wa.me necesita internet para redirigir y el cliente cortado no tiene).
+$whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawurlencode($whatsappMensaje);
 ?>
 <!DOCTYPE html>
 <html lang="es">
@@ -33,8 +34,6 @@ $whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode(
       .numero { font-weight: bold; color: #333; white-space: nowrap; }
       .referencia { margin-top: 14px; font-size: 12px; color: #999; }
       .gracias { margin-top: 18px; font-style: italic; color: #9254a4; }
-      .boton-llamar { background: #9254a4; margin-bottom: 12px; }
-      .boton-llamar:hover { background: #7d4590; }
       .nota-datos { font-size: 13px; color: #666; margin-top: 10px; line-height: 1.5; }
 
       @media (min-width: 860px) {
@@ -81,14 +80,11 @@ $whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode(
          </section>
 
          <aside class="columna-acciones">
-            <a href="tel:+522382114997" class="boton-contacto boton-llamar">
-               Llamar al 238 211 4997
-            </a>
             <a href="<?= htmlspecialchars($whatsappUrl, ENT_QUOTES, 'UTF-8') ?>" class="boton-contacto">
                Enviar mi comprobante por WhatsApp
             </a>
-            <p class="nota-datos">Para usar WhatsApp desde este celular, desactiva el WiFi y usa tus datos móviles:
-               con el servicio en pausa no hay internet por el WiFi.</p>
+            <p class="nota-datos">Se abre tu WhatsApp. Si el mensaje no se envía, desactiva el WiFi y usa tus datos
+               móviles: con el servicio en pausa no hay internet por el WiFi.</p>
 
             <div class="nota-pagado">
                <p><strong>¿Ya realizaste tu pago?</strong> ¡Muchas gracias! Si en unos minutos
