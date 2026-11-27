@@ -5,6 +5,7 @@
  *
  *   php sin-relacion-pppoe.php          resumen + lista en pantalla
  *   php sin-relacion-pppoe.php --csv    lista para Excel / para Jamileth
+ *   --router=10.0.1.6   (por defecto) solo cuentas de ese router; --router=todos para ver todas
  *
  * No escribe nada ni en RADIUS ni en la plataforma.
  */
@@ -52,6 +53,23 @@ foreach ($radius->query("SELECT username, callingstationid, acctstarttime FROM r
     if (!isset($cuentas[$k])) continue;
     $cuentas[$k]['sesion'] = (string) $f['acctstarttime'];
     $cuentas[$k]['mac'] = srMac((string) $f['callingstationid']);
+}
+/* Solo las cuentas del router elegido: por el último router donde se conectó (radacct.nasipaddress);
+   si nunca se ha conectado, por su IP (las de FSL02 usan 10.2.0.0/22). */
+$router = '10.0.1.6';
+foreach ($argv as $a) if (strpos($a, '--router=') === 0) $router = substr($a, 9);
+if ($router !== 'todos') {
+    $ultimoNas = [];
+    foreach ($radius->query("SELECT a.username, a.nasipaddress FROM radacct a
+                             JOIN (SELECT username, MAX(radacctid) AS id FROM radacct GROUP BY username) u ON u.id = a.radacctid") as $f) {
+        $ultimoNas[strtolower($f['username'])] = (string) $f['nasipaddress'];
+    }
+    $porIp = ($router === '10.0.1.6') ? '/^10\.2\.[0-3]\./' : null;
+    foreach ($cuentas as $k => $c) {
+        $nas = $ultimoNas[$k] ?? '';
+        $esDelRouter = $nas !== '' ? $nas === $router : ($porIp !== null && preg_match($porIp, $c['ip']));
+        if (!$esDelRouter) unset($cuentas[$k]);
+    }
 }
 $cuentaDeMac = [];
 foreach ($cuentas as $k => $c) if ($c['mac'] !== '') $cuentaDeMac[$c['mac']][] = $c['usuario'];
@@ -129,7 +147,7 @@ foreach ($lista as $f) {
     $m = preg_replace('/ \(servicio \d+\)| \d+ /', ' N ', $f['plataforma']);
     $porMotivo[$m] = ($porMotivo[$m] ?? 0) + 1;
 }
-echo "Cuentas PPPoE en RADIUS: " . count($cuentas) . "   ·   salen \"sin relación\": " . count($lista) . "\n\n";
+echo "Router: " . ($router === 'todos' ? 'todos' : $router) . "   ·   cuentas PPPoE: " . count($cuentas) . "   ·   salen \"sin relación\": " . count($lista) . "\n\n";
 ksort($porGrupo);
 foreach ($porGrupo as $g => $n) printf("  %-28s %4d\n", $g, $n);
 echo "\nPor qué (en la plataforma):\n";
