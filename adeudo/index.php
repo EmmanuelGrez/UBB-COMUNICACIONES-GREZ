@@ -5,7 +5,7 @@ header('Pragma: no-cache');
 
 $ipCliente = htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? '', ENT_QUOTES, 'UTF-8');
 
-$whatsappNumero  = '522382085485';
+$whatsappNumero  = '522382114997';
 $whatsappMensaje = 'Hola, quiero reactivar mi servicio de internet.'
                  . ($ipCliente !== '' ? ' Mi referencia es ' . $ipCliente . '.' : '');
 $whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode($whatsappMensaje);
@@ -71,7 +71,7 @@ $whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode(
                <ol>
                   <li>Realiza tu pago por los medios habituales.</li>
                   <li>Envíanos tu comprobante por WhatsApp al
-                     <span class="numero">238 208 5485</span>.</li>
+                     <span class="numero">238 211 4997</span>.</li>
                   <li>¡Listo! Tu conexión se restablecerá en unos minutos.</li>
                </ol>
             </div>
@@ -105,7 +105,7 @@ $whatsappUrl     = 'https://wa.me/' . $whatsappNumero . '?text=' . rawurlencode(
 
    <footer>
       <p>¿Tienes alguna duda? Estamos para ayudarte.</p>
-      <p>UBB Comunicaciones | Tel: 238 211 4997 · WhatsApp: 238 208 5485</p>
+      <p>UBB Comunicaciones | Tel. y WhatsApp: 238 211 4997</p>
       <p>Correo: ubbnetworks@gmail.com</p>
    </footer>
 
