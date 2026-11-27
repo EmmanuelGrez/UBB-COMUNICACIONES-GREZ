@@ -302,6 +302,14 @@ function portalFin(): void
         dlg.showModal();
         if (pideClave) clave.focus();
     });
+    // Enter en la clave = confirmar la acción. Sin esto, el navegador toma el primer botón del cuadro
+    // (Cancelar) y la acción se cancelaba al dar Enter.
+    document.getElementById('dlg-clave').addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || e.isComposing) return;
+        e.preventDefault();
+        if (this.value === '') { this.reportValidity(); return; }
+        dlg.close('ok');
+    });
     dlg.addEventListener('close', function () {
         var p = pendiente; pendiente = null;
         if (!p) return;
@@ -325,7 +333,7 @@ function portalFin(): void
 }
 
 /**
- * Avisos flotantes en vivo (esquina inferior derecha). Consulta ?modulo=notificaciones cada 30 s y muestra
+ * Avisos flotantes en vivo (esquina superior derecha). Consulta ?modulo=notificaciones cada 30 s y muestra
  * un cuadrito por cada aviso de equipo o suspensión/reactivación nueva. La primera vez solo toma nota de lo
  * que ya existe (no avienta avisos viejos).
  */
@@ -334,10 +342,10 @@ function portalNotificaciones(): void
     ?>
 <div class="notifs" id="notifs" aria-live="polite" aria-label="Notificaciones"></div>
 <style>
-.notifs{position:fixed;right:18px;bottom:18px;z-index:1000;display:flex;flex-direction:column-reverse;gap:10px;width:min(360px,calc(100vw - 36px));pointer-events:none}
+.notifs{position:fixed;right:18px;top:18px;z-index:1000;display:flex;flex-direction:column-reverse;gap:10px;width:min(360px,calc(100vw - 36px));pointer-events:none}
 .notif{pointer-events:auto;display:grid;grid-template-columns:42px 1fr auto;gap:12px;align-items:start;padding:13px 14px;border-radius:16px;
   background:rgba(255,255,255,.96);box-shadow:0 10px 30px rgba(40,25,70,.18),0 1px 3px rgba(40,25,70,.10);border:1px solid #ece7f5;
-  text-decoration:none;color:#2f2440;font-family:inherit;transform:translateY(12px);opacity:0;transition:transform .25s ease,opacity .25s ease}
+  text-decoration:none;color:#2f2440;font-family:inherit;transform:translateY(-12px);opacity:0;transition:transform .25s ease,opacity .25s ease}
 .notif.ver{transform:none;opacity:1}
 .notif:hover,.notif:focus-visible{border-color:#cfc3ea}
 .notif-icono{width:42px;height:42px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:17px}
@@ -349,6 +357,7 @@ function portalNotificaciones(): void
 .notif small{font-size:12px;color:#9a93a8;white-space:nowrap}
 .notif-cerrar{grid-column:3;justify-self:end;border:0;background:none;color:#9a93a8;font-size:16px;line-height:1;cursor:pointer;padding:0 0 0 6px}
 @media (prefers-reduced-motion:reduce){.notif{transition:none}}
+@media (max-width:900px){.notifs{top:72px}}
 </style>
 <script>
 (function () {
