@@ -15,6 +15,7 @@
  *   ... uisp-puente.php --explorar       (campos de servicios y motivos de suspensión)
  *   ... uisp-puente.php --explorar-nms   (camino servicio -> sitio -> equipo -> IP; requiere token NMS)
  *   ... uisp-puente.php --explorar-planes   (planes de UISP con su velocidad y periodos; y el plan de un servicio con --servicio=ID)
+ *   ... uisp-puente.php --cambiar-plan=SERVICIO_UISP --a=30 [--aplicar]   (prueba con un servicio; sin --aplicar solo simula)
  *   ... uisp-puente.php --explorar-sitio=ID   (cuántos equipos tiene un sitio del NMS, ej. PENDIENTES; solo conteos)
  */
 
@@ -251,6 +252,53 @@ function uispReactivarServicio(Client $router, int $servicioId): array
     return uispPorRouter($router, 'PATCH', "/clients/services/$servicioId/cancel-suspend");
 }
 
+/* Cambio de plan en UISP: velocidad del panel (Mbps) -> periodo del plan de UISP (de --explorar-planes, 27/11/2026).
+   20M -> HOGAR-BASICO 25 Mbps, 30M -> HOGAR-INTERMEDIO 35 Mbps, 60M -> HOGAR-AVANZADO 60 Mbps. */
+const UISP_PERIODO_POR_VELOCIDAD = [20 => 26, 30 => 14, 60 => 20];
+const UISP_PLAN_ACTIVO = '/etc/ubb-panel/uisp-plan-activo';   // si existe, Cambiar plan del panel también cambia el plan en UISP
+
+function uispCambioPlanActivo(): bool
+{
+    return is_file(UISP_PLAN_ACTIVO);
+}
+
+/** Lee el plan actual de un servicio de UISP: ['periodo' => int, 'plan' => string, 'estado' => int]. */
+function uispPlanDeServicio(Client $router, int $servicioId): array
+{
+    $r = uispPorRouter($router, 'GET', "/clients/services/$servicioId");
+    if (!$r['ok']) {
+        throw new RuntimeException("UISP no respondió el servicio #$servicioId ({$r['error']}).");
+    }
+    $sv = (array) json_decode($r['datos'], true);
+    return ['periodo' => (int) ($sv['servicePlanPeriodId'] ?? 0), 'plan' => (string) ($sv['servicePlanName'] ?? ''),
+        'estado' => (int) ($sv['status'] ?? -1)];
+}
+
+/**
+ * Cambia el plan de un servicio de UISP a la velocidad indicada y lo vuelve a leer para confirmar.
+ * Devuelve un texto corto con el resultado. Lanza error si UISP no lo aceptó.
+ */
+function uispCambiarPlanServicio(Client $router, int $servicioId, int $mbps): string
+{
+    $periodo = UISP_PERIODO_POR_VELOCIDAD[$mbps] ?? null;
+    if ($periodo === null) {
+        throw new RuntimeException("no hay plan de UISP para {$mbps}M");
+    }
+    $antes = uispPlanDeServicio($router, $servicioId);
+    if ($antes['periodo'] === $periodo) {
+        return "UISP servicio #$servicioId ya tenía {$antes['plan']}.";
+    }
+    $r = uispPorRouter($router, 'PATCH', "/clients/services/$servicioId", ['servicePlanPeriodId' => $periodo]);
+    if (!$r['ok']) {
+        throw new RuntimeException("UISP rechazó el cambio del servicio #$servicioId ({$r['error']})");
+    }
+    $despues = uispPlanDeServicio($router, $servicioId);
+    if ($despues['periodo'] !== $periodo) {
+        throw new RuntimeException("UISP respondió, pero el servicio #$servicioId sigue con {$despues['plan']}");
+    }
+    return "UISP servicio #$servicioId: de {$antes['plan']} a {$despues['plan']}.";
+}
+
 /** Durante unos minutos sync-uisp no suspende ni reactiva a este cliente, mientras UISP actualiza el router. */
 function uispMarcarGracia(PDO $pdo, string $mac): void
 {
@@ -407,6 +455,30 @@ if (in_array('--explorar-planes', $argv ?? [], true)) {
             . ' · estado ' . ($sv['status'] ?? '?') . "\n";
         $otros = array_filter(array_keys($sv), fn ($k) => stripos($k, 'plan') !== false || stripos($k, 'speed') !== false || stripos($k, 'defer') !== false);
         echo '   campos de plan: ' . implode(', ', $otros) . "\n";
+    }
+}
+
+/* --cambiar-plan=SERVICIO_UISP --a=30 [--aplicar]: prueba el cambio de plan en UISP con un solo servicio.
+   Sin --aplicar solo muestra qué haría. */
+foreach ($argv ?? [] as $a) {
+    if (!preg_match('/^--cambiar-plan=(\d+)$/', $a, $m)) continue;
+    $sid = (int) $m[1];
+    $mbps = 0;
+    foreach ($argv as $b) if (preg_match('/^--a=(\d+)M?$/i', $b, $mm)) $mbps = (int) $mm[1];
+    echo "\n--- Cambiar plan en UISP · servicio #$sid a {$mbps}M ---\n";
+    try {
+        $actual = uispPlanDeServicio($router, $sid);
+        echo "Ahora tiene: {$actual['plan']} (periodo {$actual['periodo']}, estado {$actual['estado']})\n";
+        $destino = UISP_PERIODO_POR_VELOCIDAD[$mbps] ?? null;
+        if ($destino === null) {
+            echo "No hay plan de UISP para {$mbps}M. Usa --a=20, --a=30 o --a=60.\n";
+        } elseif (!in_array('--aplicar', $argv, true)) {
+            echo "SIMULACIÓN: lo cambiaría al periodo $destino. Agrega --aplicar para hacerlo.\n";
+        } else {
+            echo uispCambiarPlanServicio($router, $sid, $mbps) . "\n";
+        }
+    } catch (Throwable $e) {
+        echo 'ERROR: ' . $e->getMessage() . "\n";
     }
 }
 
