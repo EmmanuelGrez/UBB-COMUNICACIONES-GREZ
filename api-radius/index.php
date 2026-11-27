@@ -7,6 +7,8 @@
  *   GET  /api-radius/v1/servicios/{id_servicio}     (DHCP o PPPoE; tipo DHCP|PPPOE, usuario en PPPoE)
  *   POST /api-radius/v1/servicios/{id_servicio}/suspender
  *   POST /api-radius/v1/servicios/{id_servicio}/reactivar
+ *   GET  /api-radius/v1/equipos/{nombre}          qué es un equipo según RADIUS: tipo DHCP|PPPOE, MAC, IP,
+ *   GET  /api-radius/v1/equipos?mac=AA:BB:…        servidor DHCP, plan, estado y servicios donde está ligado
  *
  * Contrato: documento "API RADIUS para UBB Pagos: suspensiones y reactivaciones".
  * Usa exactamente las mismas funciones que los botones del panel (radius-dhcp-acciones.php),
@@ -178,6 +180,16 @@ function apiBuscarEquipo(PDO $radius, int $idServicio): array
     foreach ($st->fetchAll() as $f) {
         $equipos[strtoupper(trim((string) $f['servidor_dhcp'])) . '|' . strtoupper(trim((string) $f['mac']))] = $f;
     }
+    if (count($equipos) > 0) {
+        // Si además tiene una cuenta PPPoE vigente, no adivinar cuál es la buena.
+        $st = $jam->prepare("SELECT COUNT(*) FROM integracion_winbox
+                             WHERE id_servicio = ? AND id_cliente = ? AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%'
+                               AND pppoe_name IS NOT NULL AND TRIM(pppoe_name) <> ''");
+        $st->execute([$idServicio, $servicio['id_cliente']]);
+        if ((int) $st->fetchColumn() > 0) {
+            throw new ApiError(409, 'SIN_RELACION', "El servicio $idServicio tiene varios equipos relacionados (DHCP y PPPoE); no se hace nada para no afectar al equivocado.");
+        }
+    }
     if (count($equipos) === 0) {
         // Sin equipo DHCP: ¿tiene cuenta PPPoE relacionada?
         $st = $jam->prepare("SELECT DISTINCT LOWER(TRIM(pppoe_name)) FROM integracion_winbox
@@ -277,6 +289,94 @@ function apiEstado(PDO $radius, array $eq): array
         'plan' => $plan,
         'suspendido_por' => $origen,
     ];
+}
+
+/**
+ * Qué es un equipo según RADIUS, buscado por MAC, por cuenta PPPoE o por el nombre que el módem
+ * manda al router (host-name de DHCP, solo si está conectado). Solo lectura.
+ */
+function apiConsultarEquipo(PDO $radius, string $buscado): array
+{
+    $esMac = (bool) preg_match('/^(?:[0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/', $buscado);
+    $mac = null;
+    $servidorLease = null;
+    if ($esMac) {
+        $mac = rdNormalizarMac($buscado);
+    } else {
+        // ¿Cuenta PPPoE?
+        $st = $radius->prepare("SELECT username FROM radcheck WHERE LOWER(username) = ? AND attribute = 'Cleartext-Password'");
+        $st->execute([strtolower($buscado)]);
+        $usuarios = $st->fetchAll(PDO::FETCH_COLUMN);
+        if (count($usuarios) === 1) {
+            $eq = apiEquipoPppoe($radius, 0, (string) $usuarios[0]);
+            $estado = apiEstado($radius, $eq);
+            return [
+                'tipo' => 'PPPOE', 'nombre' => $eq['usuario'], 'usuario' => $eq['usuario'], 'mac' => $eq['mac'],
+                'ip' => $eq['ip'], 'servidor_dhcp' => null, 'vlan' => null,
+                'plan' => $estado['plan'], 'estado_actual' => $estado['estado'],
+                'servicios_ligados' => apiServiciosDeEquipo(null, $eq['usuario']),
+            ];
+        }
+        // ¿Módem DHCP conectado con ese nombre?
+        try {
+            $router = uispConectarRouter('10.0.1.6');
+            foreach (array_unique([$buscado, strtoupper($buscado)]) as $nombre) {
+                foreach (rdRouter($router, (new RouterOS\Query('/ip/dhcp-server/lease/print'))->where('host-name', $nombre)) as $l) {
+                    if (!empty($l['mac-address'])) {
+                        $mac = rdNormalizarMac((string) $l['mac-address']);
+                        $servidorLease = (string) ($l['server'] ?? '');
+                        break 2;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            throw new ApiError(502, 'ROUTER_SIN_RESPUESTA', 'No se pudo consultar el router para buscar el nombre del equipo; intenta con su MAC.');
+        }
+        if ($mac === null) {
+            throw new ApiError(404, 'NO_EXISTE', "No hay cuenta PPPoE llamada $buscado ni un módem DHCP conectado con ese nombre. Si es DHCP y está apagado o tiene nombre de fábrica, consulta por su MAC.");
+        }
+    }
+    $st = $radius->prepare('SELECT COUNT(*) FROM radcheck WHERE username = ?');
+    $st->execute([$mac]);
+    if ((int) $st->fetchColumn() === 0) {
+        throw new ApiError(404, 'NO_EXISTE', "La MAC $mac no está dada de alta en RADIUS (DHCP).");
+    }
+    $cliente = rdLeerCliente($radius, $mac);
+    $cfg = null;
+    foreach (rdVlans() as $vlan => $c) {
+        if ($cliente['ip'] !== '' && strpos($cliente['ip'], $c['prefijo']) === 0) {
+            $cfg = $c + ['vlan' => (string) $vlan];
+            break;
+        }
+    }
+    $estado = apiEstado($radius, ['tipo' => 'DHCP', 'mac' => $mac, 'lista' => $cliente['lista'], 'cfg' => $cfg ?? ['lista' => '']]);
+    return [
+        'tipo' => 'DHCP', 'nombre' => $esMac ? null : $buscado, 'usuario' => null, 'mac' => $mac,
+        'ip' => $cliente['ip'] !== '' ? $cliente['ip'] : null,
+        'servidor_dhcp' => $cfg['servidor'] ?? ($servidorLease ?: null), 'vlan' => $cfg['vlan'] ?? null,
+        'plan' => $estado['plan'], 'estado_actual' => $estado['estado'],
+        'servicios_ligados' => apiServiciosDeEquipo($mac, null),
+    ];
+}
+
+/** Servicios de la plataforma donde el equipo está RELACIONADO (para detectar duplicados). */
+function apiServiciosDeEquipo(?string $mac, ?string $usuario): array
+{
+    try {
+        $jam = apiPdoJamileth();
+        if ($mac !== null) {
+            $st = $jam->prepare("SELECT DISTINCT id_servicio FROM integracion_winbox
+                                 WHERE UPPER(TRIM(mac)) = ? AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND id_servicio IS NOT NULL");
+            $st->execute([$mac]);
+        } else {
+            $st = $jam->prepare("SELECT DISTINCT id_servicio FROM integracion_winbox
+                                 WHERE LOWER(TRIM(pppoe_name)) = ? AND UPPER(estado_vinculacion) LIKE 'RELACIONADO%' AND id_servicio IS NOT NULL");
+            $st->execute([strtolower((string) $usuario)]);
+        }
+        return array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+    } catch (Throwable $e) {
+        return [];
+    }
 }
 
 /* ---------- Programa ---------- */
@@ -407,6 +507,21 @@ try {
             'servicios' => $lista,
             'mensaje' => 'Consulta sin cambios.',
         ]);
+    }
+
+    /* --- GET /equipos/{nombre} o /equipos?mac= : qué es un equipo según RADIUS (solo lectura) --- */
+    if ($sub === '/equipos' || strpos($sub, '/equipos/') === 0) {
+        if ($metodo !== 'GET') {
+            throw new ApiError(404, 'NO_EXISTE', 'Usa GET para consultar equipos.');
+        }
+        if (isset($token['servicios']) && is_array($token['servicios'])) {
+            throw new ApiError(401, 'NO_AUTORIZADO', 'Este token de pruebas no puede consultar equipos.');
+        }
+        $buscado = $sub === '/equipos' ? trim((string) ($_GET['mac'] ?? '')) : rawurldecode(substr($sub, strlen('/equipos/')));
+        if ($buscado === '' || !preg_match('/^[A-Za-z0-9_.:\-]{1,64}$/', $buscado)) {
+            throw new ApiError(400, 'DATOS_INVALIDOS', 'Indica el nombre del equipo (/equipos/UBB-…) o su MAC (/equipos?mac=AA:BB:…).');
+        }
+        apiResponder(200, ['resultado' => 'EQUIPO', 'mensaje' => 'Consulta sin cambios.'] + apiConsultarEquipo($apiPdo, $buscado));
     }
 
     if (!preg_match('#^/servicios/(\d{1,10})(?:/(suspender|reactivar))?$#', $sub, $m)) {
