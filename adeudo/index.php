@@ -34,6 +34,8 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
       .numero { font-weight: bold; color: #333; white-space: nowrap; }
       .referencia { margin-top: 14px; font-size: 12px; color: #999; }
       .gracias { margin-top: 18px; font-style: italic; color: #9254a4; }
+      .boton-llamar { background: #9254a4; margin-bottom: 12px; }
+      .boton-llamar:hover { background: #7d4590; }
       .nota-datos { font-size: 13px; color: #666; margin-top: 10px; line-height: 1.5; }
 
       @media (min-width: 860px) {
@@ -80,6 +82,9 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
          </section>
 
          <aside class="columna-acciones">
+            <a href="tel:+522382114997" class="boton-contacto boton-llamar">
+               Llamar al 238 211 4997
+            </a>
             <a href="<?= htmlspecialchars($whatsappUrl, ENT_QUOTES, 'UTF-8') ?>" class="boton-contacto">
                Enviar mi comprobante por WhatsApp
             </a>
