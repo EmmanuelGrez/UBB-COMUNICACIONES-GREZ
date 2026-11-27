@@ -12,6 +12,7 @@
  *   php cortar-pendientes.php --aplicar --lote=20 --solo=dhcp|pppoe
  *   php cortar-pendientes.php --incluir-duplicados    no excluye a los que tienen coincidencia en UISP
  *   php cortar-pendientes.php --incluir-desconectados también corta los "PENDIENTE real" (no conectados)
+ *   php cortar-pendientes.php --solo-bajas            corta SOLO los que tienen servicio dado de BAJA en UBB Pagos
  *   php cortar-pendientes.php --deshacer              SIMULA reactivar a todos los que cortó esta herramienta
  *   php cortar-pendientes.php --deshacer --aplicar    los reactiva
  *   php cortar-pendientes.php --deshacer=UBB-TP5DDB13 --aplicar   reactiva solo a uno (MAC o usuario PPPoE)
@@ -37,6 +38,7 @@ set_time_limit(0);
 $aplicar = in_array('--aplicar', $argv, true);
 $incluirDuplicados = in_array('--incluir-duplicados', $argv, true);
 $incluirDesconectados = in_array('--incluir-desconectados', $argv, true);
+$soloBajas = in_array('--solo-bajas', $argv, true);
 $lote = 20;
 $solo = '';
 $deshacer = null;
@@ -156,8 +158,10 @@ if ($deshacer !== null) {
 }
 
 /* ------------------------------ Cortar ------------------------------ */
-$dudosos = array_values(array_filter(cpCsv('sync-pendientes.php', 'tipo,'), fn ($f) => strpos($f['resultado'], 'DUDOSO') === 0
-    || ($incluirDesconectados && strpos($f['resultado'], 'PENDIENTE real') === 0)));
+$dudosos = array_values(array_filter(cpCsv('sync-pendientes.php', 'tipo,'), fn ($f) => $soloBajas
+    ? (strpos($f['resultado'], 'CLIENTE en UBB Pagos') === 0 && stripos($f['servicio_ubb_pagos'], '(BAJA)') !== false)
+    : (strpos($f['resultado'], 'DUDOSO') === 0
+       || ($incluirDesconectados && strpos($f['resultado'], 'PENDIENTE real') === 0))));
 $excluidos = [];
 if (!$incluirDuplicados) {
     foreach (cpCsv('pendientes-duplicados.php', 'resultado,') as $f) {
@@ -180,7 +184,7 @@ foreach ($dudosos as $f) {
     $lista[] = $f;
 }
 
-echo "$modo · cortar DUDOSOS" . ($incluirDesconectados ? ' y PENDIENTES REALES' : '') . " de PENDIENTES · " . date('Y-m-d H:i') . "\n";
+echo "$modo · cortar " . ($soloBajas ? 'SERVICIOS EN BAJA' : 'DUDOSOS' . ($incluirDesconectados ? ' y PENDIENTES REALES' : '')) . " de PENDIENTES · " . date('Y-m-d H:i') . "\n";
 echo 'Dudosos: ' . count($dudosos) . ' · excluidos: ' . count($omitidos) . ' · ya cortados antes: ' . count($ya)
     . ' · por cortar: ' . count($lista) . ' · este lote: ' . min($lote, count($lista)) . "\n\n";
 foreach ($omitidos as [$f, $por]) {
