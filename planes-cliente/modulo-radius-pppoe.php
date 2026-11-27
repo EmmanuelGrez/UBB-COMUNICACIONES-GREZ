@@ -454,7 +454,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && in_array($_POST['accion'] ?? '', ['
             rdBitacora($pdoPp, $u, $ip, 'cambiar_plan', "PPPoE, $anterior -> $perfil", 'PANEL');
             rdAvisarMonitoreo($pdoPp, 'CAMBIO_PLAN', ['usuario' => $u], 'Cambio de ' . ppPlan($anterior) . ' a ' . ppPlan($perfil), 'PANEL', $ip);
             $_SESSION['flash_radius_pppoe_ok'] = "Plan cambiado: $u ahora tiene $perfil. "
-                . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'));
+                . ($cli['susp_radius'] ? 'Sigue suspendido; al reactivarlo tendrá el nuevo plan.' : ($conectado ? 'Se reconectó con la nueva velocidad.' : 'Tomará la nueva velocidad al conectarse.'))
+                . rdUispCambiarPlan($pdoPp, $routerPp, (string) ($cli['mac'] ?? ''), (string) $ip, $u, $perfil);
         }
     } catch (Throwable $e) {
         if ($pdoPp instanceof PDO && $pdoPp->inTransaction()) {

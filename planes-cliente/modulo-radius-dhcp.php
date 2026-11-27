@@ -158,7 +158,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             $configRouter = $mikrotikConfig;
             $configRouter['host'] = $cfgRd['router'];
             $router = crearClienteMikrotik($configRouter);
-            $_SESSION['flash_radius_dhcp_ok'] = rdCambiarPlan($pdoRd, $router, $cfgRd + ['vlan' => $vlanRd], $mac, (string) ($_POST['plan'] ?? ''));
+            $planNuevoRd = (string) ($_POST['plan'] ?? '');
+            $mensajeRd = rdCambiarPlan($pdoRd, $router, $cfgRd + ['vlan' => $vlanRd], $mac, $planNuevoRd);
+            $mensajeRd .= rdUispCambiarPlan($pdoRd, $router, $mac, rdLeerCliente($pdoRd, $mac)['ip'], '', $planNuevoRd);
+            $_SESSION['flash_radius_dhcp_ok'] = $mensajeRd;
         } else {
             throw new RuntimeException('Operación no reconocida.');
         }

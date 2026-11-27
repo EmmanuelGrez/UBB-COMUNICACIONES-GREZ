@@ -612,6 +612,53 @@ function rdCambiarPlan(PDO $pdo, Client $router, array $cfg, string $mac, string
     return $mensaje;
 }
 
+/**
+ * Después de cambiar el plan en RADIUS: cambia también el plan del servicio en UISP (si está activado).
+ * Nunca lanza error: RADIUS ya cambió. Devuelve un texto para el mensaje del panel ('' si está apagado).
+ * Busca el servicio de UISP por MAC/IP (ubb_uisp_mapa) y, si no, por la relación de la plataforma.
+ */
+function rdUispCambiarPlan(PDO $pdo, Client $router, string $mac, string $ip, string $usuarioPppoe, string $planNuevo): string
+{
+    if (!uispCambioPlanActivo()) {
+        return '';
+    }
+    if (!preg_match('/(\d+)M/i', $planNuevo, $m)) {
+        return " ⚠ UISP: no reconozco la velocidad de $planNuevo; cámbialo a mano en UISP.";
+    }
+    $mbps = (int) $m[1];
+    $quien = $usuarioPppoe !== '' ? $usuarioPppoe : $mac;
+    try {
+        $id = null;
+        try {
+            $id = uispServicioDe($pdo, $mac, $ip);
+        } catch (Throwable $e) {
+            return ' ⚠ UISP: ' . $e->getMessage() . ' Cámbialo a mano.';
+        }
+        if ($id === null && function_exists('obtenerPDOJamileth')) {
+            $jam = obtenerPDOJamileth();
+            $sql = "SELECT DISTINCT s.uisp_service_id FROM integracion_winbox w JOIN servicios s ON s.id_servicio = w.id_servicio
+                    WHERE UPPER(w.estado_vinculacion) LIKE 'RELACIONADO%' AND s.uisp_service_id IS NOT NULL AND "
+                . ($usuarioPppoe !== '' ? 'LOWER(TRIM(w.pppoe_name)) = ?' : 'UPPER(TRIM(w.mac)) = ?');
+            $st = $jam->prepare($sql);
+            $st->execute([$usuarioPppoe !== '' ? strtolower($usuarioPppoe) : strtoupper($mac)]);
+            $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+            if (count($ids) > 1) {
+                return ' ⚠ UISP: está en varios servicios (#' . implode(', #', $ids) . '); cámbialo a mano.';
+            }
+            $id = $ids[0] ?? null;
+        }
+        if (!$id) {
+            return ' ⚠ UISP: no encontré su servicio de UISP; cámbialo a mano.';
+        }
+        $texto = uispCambiarPlanServicio($router, $id, $mbps);
+        rdBitacora($pdo, $quien, $ip, 'uisp_plan', $texto, 'PANEL');
+        return ' ' . $texto;
+    } catch (Throwable $e) {
+        error_log("UBB panel: cambio de plan en UISP de $quien: " . $e->getMessage());
+        return ' ⚠ UISP: ' . $e->getMessage() . '. Cámbialo a mano en UISP.';
+    }
+}
+
 /** Plan vigente de un cliente: su lista, o la que tendrá al reactivarse si está suspendido. */
 function rdPlanVigente(PDO $pdo, string $mac): string
 {
