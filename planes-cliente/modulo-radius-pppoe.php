@@ -544,6 +544,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
 $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
+$suspPp = count(array_filter($clientesPp, fn ($c) => $c['suspendido'] || $c['susp_radius']));
 $suspRadiusPp = [];
 if ($pdoPp instanceof PDO) {
     try {
@@ -667,6 +668,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
     <section class="general">
         <div class="g-total"><b><?= $totalPp ?></b><span>clientes PPPoE<br>router + RADIUS</span></div>
         <div><b><?= $enLineaPp ?></b><span>en línea</span></div>
+        <div title="Suspendidos en RADIUS o en la lista CLIENTES-DEUDORES (ven la página de adeudo)"><b><?= $suspPp ?></b><span>suspendidos</span></div>
         <div><b><?= $uispPp ?></b><span>bloqueados en UISP</span></div>
         <div title="Su cuenta del router está desactivada y ahora entra por RADIUS"><b><?= $migradosPp ?></b><span>migrados a RADIUS<br><?= $porRadiusPp ?> conectados por RADIUS</span></div>
         <div title="Tienen su cuenta copiada en RADIUS, pero todavía entran con la cuenta del router"><b><?= $copiadosPp ?></b><span>copiados a RADIUS</span></div>
@@ -693,6 +695,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
             <option value="">Todos</option>
             <option value="linea">En línea</option>
             <option value="fuera">Desconectados</option>
+            <option value="suspendido">Suspendidos</option>
             <option value="sincola">En línea sin cola</option>
             <option value="uisp">Bloqueados en UISP</option>
             <option value="migrado">Migrados a RADIUS</option>
@@ -719,6 +722,7 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                 if ($c['en_linea']) $estados[] = 'linea'; else $estados[] = 'fuera';
                 if ($colasOkPp && $c['en_linea'] && $c['cola'] === '') $estados[] = 'sincola';
                 if ($c['uisp']) $estados[] = 'uisp';
+                if ($c['suspendido'] || $c['susp_radius']) $estados[] = 'suspendido';
                 if ($c['radius']) $estados[] = 'radius';
                 if ($c['migrado']) $estados[] = 'migrado';
                 if ($c['por_radius']) $estados[] = 'porradius';
