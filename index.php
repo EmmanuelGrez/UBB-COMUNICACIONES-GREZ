@@ -65,17 +65,16 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
       <div class="aviso-grid">
 
          <section class="columna-mensaje">
-            <p class="saludo">¡Hola! Queremos avisarte que tu servicio de internet se encuentra
-               temporalmente en pausa porque tenemos registrado un pago pendiente.</p>
+            <p class="saludo">¡Hola! Tu servicio de internet se encuentra temporalmente en pausa.</p>
 
-            <p>No te preocupes, renovar tu conexión es muy sencillo y estamos aquí para ayudarte.</p>
+            <p>Comunícate con nosotros y con gusto te ayudamos a reactivarlo.</p>
 
             <div class="pasos">
-               <h2>¿Cómo renuevo mi servicio?</h2>
+               <h2>¿Cómo reactivo mi servicio?</h2>
                <ol>
-                  <li>Realiza tu pago por los medios habituales.</li>
-                  <li>Envíanos tu comprobante por WhatsApp al
+                  <li>Llámanos o escríbenos por WhatsApp al
                      <span class="numero">238 211 4997</span>.</li>
+                  <li>Danos tu referencia<?= $ipCliente !== '' ? ': <span class="numero">' . $ipCliente . '</span>' : '' ?>.</li>
                   <li>¡Listo! Tu conexión se restablecerá en unos minutos.</li>
                </ol>
             </div>
@@ -86,14 +85,14 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
                Llamar al 238 211 4997
             </a>
             <a href="<?= htmlspecialchars($whatsappUrl, ENT_QUOTES, 'UTF-8') ?>" class="boton-contacto">
-               Enviar mi comprobante por WhatsApp
+               Escribir por WhatsApp
             </a>
             <p class="nota-datos">Se abre tu WhatsApp. Si el mensaje no se envía, desactiva el WiFi y usa tus datos
                móviles: con el servicio en pausa no hay internet por el WiFi.</p>
 
             <div class="nota-pagado">
-               <p><strong>¿Ya realizaste tu pago?</strong> ¡Muchas gracias! Si en unos minutos
-                  tu servicio no se restablece, reinicia tu módem o escríbenos y con gusto te ayudamos.</p>
+               <p><strong>¿Ya hablaste con nosotros?</strong> ¡Gracias! Si en unos minutos
+                  tu servicio no regresa, reinicia tu módem o vuelve a escribirnos.</p>
             </div>
 
             <div class="horario">
@@ -105,7 +104,7 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
             <p class="gracias">Gracias por confiar en UBB Comunicaciones.</p>
 
             <?php if ($ipCliente !== ''): ?>
-               <p class="referencia">Referencia para soporte: <?= $ipCliente ?></p>
+               <p class="referencia">Tu referencia: <?= $ipCliente ?></p>
             <?php endif; ?>
          </aside>
 
