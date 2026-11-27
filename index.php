@@ -74,7 +74,7 @@ $whatsappUrl     = 'whatsapp://send?phone=' . $whatsappNumero . '&text=' . rawur
                <ol>
                   <li>Llámanos o escríbenos por WhatsApp al
                      <span class="numero">238 211 4997</span>.</li>
-                  <li>Danos tu referencia<?= $ipCliente !== '' ? ': <span class="numero">' . $ipCliente . '</span>' : '' ?>.</li>
+                  <li>Dinos a nombre de quién está tu servicio.</li>
                   <li>¡Listo! Tu conexión se restablecerá en unos minutos.</li>
                </ol>
             </div>
