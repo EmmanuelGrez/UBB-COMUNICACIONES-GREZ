@@ -563,4 +563,4 @@ foreach ($argv ?? [] as $arg) {
         echo "   por rol: " . json_encode($porRol) . "\n   por IP: " . json_encode($red) . "\n";
     }
 }
-echo "Listo. No se cambió nada.\n";
+echo (in_array('--aplicar', $argv ?? [], true) ? "Listo.\n" : "Listo. No se cambió nada.\n");
