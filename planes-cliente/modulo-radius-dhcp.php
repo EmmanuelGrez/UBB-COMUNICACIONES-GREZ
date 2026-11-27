@@ -135,6 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $pdoRd instanceof PDO) {
             $router = crearClienteMikrotik($configRouter);
             $_SESSION['flash_radius_dhcp_ok'] = rdPasarARadius($pdoRd, $router, $cfgRd, $mac, rdPlanesDisponibles($router, $vlanRd));
         } elseif ($accion === 'suspender' || $accion === 'reactivar') {
+            rdExigirClave((string) ($_POST['clave'] ?? '')); // cortar o reactivar: pide la clave de acciones
             if (!$tablaSuspensionesRd) {
                 throw new RuntimeException('Falta la tabla radius.ubb_suspensiones. Créala antes de suspender.');
             }
@@ -633,9 +634,10 @@ portalInicio('Clientes DHCP en RADIUS', 'IP fija, plan y suspensión de cada cli
                               data-confirmar="<?= $suspendido ? '¿Reactivar' : '¿Suspender' ?> a <?= escapar($nombreRd) ?>?"
                               data-detalle="<?= $suspendido ? 'Vuelve a tener internet con su plan de siempre.' : 'Se le corta el internet de inmediato y verá el aviso de suspensión. Puedes reactivarlo después.' ?> MAC <?= escapar($c['mac']) ?>.<?= $uispActivoRd ? (count($idsUisp) === 1 ? ' También se ' . ($suspendido ? 'reactiva' : 'suspende') . ' en UISP (servicio #' . $idsUisp[0] . ').' : ' No tiene servicio de UISP enlazado: en UISP no cambia.') : '' ?>"
                               data-verbo="<?= $suspendido ? 'Reactivar' : 'Suspender' ?> <?= escapar($c['ip']) ?>"
-                              data-tono="<?= $suspendido ? 'bien' : 'peligro' ?>">
+                              data-tono="<?= $suspendido ? 'bien' : 'peligro' ?>" data-pedir-clave="1">
                             <input type="hidden" name="csrf_radius_dhcp" value="<?= escapar($csrfRd) ?>">
                             <input type="hidden" name="mac" value="<?= escapar($c['mac']) ?>">
+                            <input type="hidden" name="clave" value="">
                             <?php if ($suspendido): ?>
                                 <button class="b-react" name="accion" value="reactivar">Reactivar</button>
                             <?php else: ?>
