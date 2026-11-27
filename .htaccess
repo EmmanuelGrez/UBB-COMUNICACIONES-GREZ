@@ -27,3 +27,10 @@ RedirectMatch 404 "/\.(git|svn|hg)(/|$)"
 <FilesMatch "\.php\.">
     Require all denied
 </FilesMatch>
+
+# --- UBB: aviso para celulares y computadoras de clientes cortados ---
+# Al conectarse, Android, iPhone, Windows y Firefox piden estas direcciones para saber si hay internet.
+# Un cliente en CLIENTES-DEUDORES llega aquí (el router desvía el puerto 80); al recibir una redirección
+# el equipo muestra "Iniciar sesión en la red" y abre la página de aviso. Antes recibían 404 y solo decían
+# "Sin conexión a Internet".
+RedirectMatch 302 "(?i)^/(generate_204|gen_204|hotspot-detect\.html|library/test/success\.html|connecttest\.txt|ncsi\.txt|redirect|canonical\.html|success\.txt|kindle-wifi/wifistub\.html|mobile/status\.php|check_network_status\.txt)$" /adeudo/
