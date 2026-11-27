@@ -4,6 +4,7 @@
  * y qué dice RADIUS de cada uno (existe, IP, plan o suspendido, sesión abierta).
  *   php revisar-servicios.php 127 328 496
  *   php revisar-servicios.php --equipo=UBB-TP5F1F1        (en qué servicios aparece un equipo)
+ *   php revisar-servicios.php --cliente="laura hernandez"  (servicios de un cliente por nombre)
  */
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 
@@ -63,8 +64,23 @@ if ($equipo !== null) {
     foreach ($st->fetchAll() as $f) { echo "  servicio {$f['id_servicio']}\n"; rsMostrar($jam, $radius, [$f]); }
     exit;
 }
-$ids = array_values(array_filter(array_map('intval', array_slice($argv, 1))));
-if (!$ids) exit("Uso: php revisar-servicios.php 127 328 …  |  --equipo=UBB-…\n");
+$ids = [];
+foreach ($argv as $a) {
+    if (strpos($a, '--cliente=') !== 0) continue;
+    $palabras = array_filter(preg_split('/\s+/', trim(substr($a, 10))));
+    if (!$palabras) exit("Escribe un nombre: --cliente=\"laura hernandez\"\n");
+    $where = [];
+    $par = [];
+    foreach ($palabras as $p) { $where[] = "CONCAT_WS(' ', c.nombre, c.apellido_paterno, c.apellido_materno) LIKE ?"; $par[] = '%' . $p . '%'; }
+    $st = $jam->prepare('SELECT s.id_servicio FROM clientes c JOIN servicios s ON s.id_cliente = c.id_cliente WHERE '
+        . implode(' AND ', $where) . ' ORDER BY s.id_servicio LIMIT 30');
+    $st->execute($par);
+    $ids = array_map('intval', $st->fetchAll(PDO::FETCH_COLUMN));
+    if (!$ids) exit("No hay clientes con ese nombre en la plataforma.\n");
+    echo count($ids) . " servicio(s) de clientes que coinciden con \"" . implode(' ', $palabras) . "\"\n";
+}
+if (!$ids) $ids = array_values(array_filter(array_map('intval', array_slice($argv, 1))));
+if (!$ids) exit("Uso: php revisar-servicios.php 127 328 …  |  --equipo=UBB-…  |  --cliente=\"nombre\"\n");
 $sv = $jam->prepare('SELECT id_servicio, estado, tecnologia, uisp_service_id FROM servicios WHERE id_servicio = ?');
 $eq = $jam->prepare("SELECT $cols FROM integracion_winbox w WHERE w.id_servicio = ? ORDER BY w.estado_vinculacion");
 echo "SOLO LECTURA · " . date('Y-m-d H:i') . "\n";
