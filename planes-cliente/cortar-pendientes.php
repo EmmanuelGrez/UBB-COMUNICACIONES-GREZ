@@ -11,6 +11,7 @@
  *   php cortar-pendientes.php --aplicar --lote=20     corta los primeros 20 que falten
  *   php cortar-pendientes.php --aplicar --lote=20 --solo=dhcp|pppoe
  *   php cortar-pendientes.php --incluir-duplicados    no excluye a los que tienen coincidencia en UISP
+ *   php cortar-pendientes.php --incluir-desconectados también corta los "PENDIENTE real" (no conectados)
  *   php cortar-pendientes.php --deshacer              SIMULA reactivar a todos los que cortó esta herramienta
  *   php cortar-pendientes.php --deshacer --aplicar    los reactiva
  *   php cortar-pendientes.php --deshacer=UBB-TP5DDB13 --aplicar   reactiva solo a uno (MAC o usuario PPPoE)
@@ -35,6 +36,7 @@ set_time_limit(0);
 
 $aplicar = in_array('--aplicar', $argv, true);
 $incluirDuplicados = in_array('--incluir-duplicados', $argv, true);
+$incluirDesconectados = in_array('--incluir-desconectados', $argv, true);
 $lote = 20;
 $solo = '';
 $deshacer = null;
@@ -154,7 +156,8 @@ if ($deshacer !== null) {
 }
 
 /* ------------------------------ Cortar ------------------------------ */
-$dudosos = array_values(array_filter(cpCsv('sync-pendientes.php', 'tipo,'), fn ($f) => strpos($f['resultado'], 'DUDOSO') === 0));
+$dudosos = array_values(array_filter(cpCsv('sync-pendientes.php', 'tipo,'), fn ($f) => strpos($f['resultado'], 'DUDOSO') === 0
+    || ($incluirDesconectados && strpos($f['resultado'], 'PENDIENTE real') === 0)));
 $excluidos = [];
 if (!$incluirDuplicados) {
     foreach (cpCsv('pendientes-duplicados.php', 'resultado,') as $f) {
@@ -177,7 +180,7 @@ foreach ($dudosos as $f) {
     $lista[] = $f;
 }
 
-echo "$modo · cortar DUDOSOS de PENDIENTES · " . date('Y-m-d H:i') . "\n";
+echo "$modo · cortar DUDOSOS" . ($incluirDesconectados ? ' y PENDIENTES REALES' : '') . " de PENDIENTES · " . date('Y-m-d H:i') . "\n";
 echo 'Dudosos: ' . count($dudosos) . ' · excluidos: ' . count($omitidos) . ' · ya cortados antes: ' . count($ya)
     . ' · por cortar: ' . count($lista) . ' · este lote: ' . min($lote, count($lista)) . "\n\n";
 foreach ($omitidos as [$f, $por]) {
@@ -212,7 +215,7 @@ foreach (array_slice($lista, 0, $lote) as $f) {
                 ->execute([$u, RD_LISTA_DEUDORES]);
             $pdo->commit();
             rdAvisarMonitoreo($pdo, 'BAJA_PAGO', ['usuario' => $u], 'Equipo sin servicio (PENDIENTES)', 'PANEL', $ip);
-            cpDesconectarPppoe($router, $u);
+            cpDesconectarPppoe($router, $u);   // si no estaba conectado no pasa nada
             rdBitacora($pdo, $u, $ip, 'suspender', 'PPPoE, equipo sin servicio en PENDIENTES, estaba ' . $perfil, 'PANEL');
         }
         rdBitacora($pdo, $u, $ip, 'pendientes', 'corte ' . date('Y-m-d H:i'), 'PANEL');
