@@ -544,7 +544,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['accion'] ?? '') === 'alta_
 $totalPp = count($clientesPp);
 $enLineaPp = count(array_filter($clientesPp, fn ($c) => $c['en_linea']));
 $uispPp = count(array_filter($clientesPp, fn ($c) => $c['uisp']));
-$suspPp = count(array_filter($clientesPp, fn ($c) => $c['suspendido'] || $c['susp_radius']));
 $suspRadiusPp = [];
 if ($pdoPp instanceof PDO) {
     try {
@@ -563,6 +562,7 @@ foreach ($clientesPp as &$c) {
     $c['susp_radius'] = isset($suspRadiusPp[strtolower($c['usuario'])]);
 }
 unset($c);
+$suspPp = count(array_filter($clientesPp, fn ($c) => !empty($c['suspendido']) || !empty($c['susp_radius'])));
 $copiadosPp = count(array_filter($clientesPp, fn ($c) => $c['radius']));
 $migradosPp = count(array_filter($clientesPp, fn ($c) => $c['migrado'] && empty($c['solo_radius'])));
 $porRadiusPp = count(array_filter($clientesPp, fn ($c) => $c['por_radius']));
