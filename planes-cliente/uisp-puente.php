@@ -14,6 +14,7 @@
  *   docker exec -it servidor-aviso php /var/www/html/planes-cliente/uisp-puente.php
  *   ... uisp-puente.php --explorar       (campos de servicios y motivos de suspensión)
  *   ... uisp-puente.php --explorar-nms   (camino servicio -> sitio -> equipo -> IP; requiere token NMS)
+ *   ... uisp-puente.php --explorar-planes   (planes de UISP con su velocidad y periodos; y el plan de un servicio con --servicio=ID)
  *   ... uisp-puente.php --explorar-sitio=ID   (cuántos equipos tiene un sitio del NMS, ej. PENDIENTES; solo conteos)
  */
 
@@ -375,6 +376,37 @@ if (in_array('--explorar', $argv ?? [], true)) {
                 }
             }
         }
+    }
+}
+
+/* --explorar-planes: planes de servicio de UISP (para saber qué plan corresponde a 20M/30M/60M). Solo consulta. */
+if (in_array('--explorar-planes', $argv ?? [], true)) {
+    echo "\n--- Planes de UISP (solo consulta) ---\n";
+    $r = uispPorRouter($router, 'GET', '/service-plans');
+    if (!$r['ok']) {
+        echo "falló -> {$r['error']}\n";
+    } else {
+        foreach ((array) json_decode($r['datos'], true) as $p) {
+            if (($p['servicePlanType'] ?? $p['type'] ?? '') !== '' && stripos((string) ($p['servicePlanType'] ?? $p['type']), 'internet') === false) continue;
+            $periodos = [];
+            foreach ((array) ($p['periods'] ?? []) as $per) {
+                if (!empty($per['enabled'])) $periodos[] = 'periodo ' . ($per['id'] ?? '?') . ' (' . ($per['period'] ?? '?') . ' mes, $' . ($per['price'] ?? '?') . ')';
+            }
+            printf("  plan %-4s %-32s bajada %-6s subida %-6s %s%s\n", $p['id'] ?? '?', $p['name'] ?? '?',
+                ($p['downloadSpeed'] ?? '?'), ($p['uploadSpeed'] ?? '?'), implode(' · ', $periodos),
+                !empty($p['archived']) ? '  [archivado]' : '');
+        }
+    }
+    foreach ($argv as $a) {
+        if (!preg_match('/^--servicio=(\d+)$/', $a, $m)) continue;
+        $r = uispPorRouter($router, 'GET', '/clients/services/' . $m[1]);
+        if (!$r['ok']) { echo "Servicio {$m[1]}: falló -> {$r['error']}\n"; continue; }
+        $sv = (array) json_decode($r['datos'], true);
+        echo "\nServicio {$m[1]}: plan " . ($sv['servicePlanId'] ?? '?') . ' ' . ($sv['servicePlanName'] ?? '')
+            . ' · periodo ' . ($sv['servicePlanPeriodId'] ?? '?') . ' · bajada ' . ($sv['downloadSpeed'] ?? '?')
+            . ' · estado ' . ($sv['status'] ?? '?') . "\n";
+        $otros = array_filter(array_keys($sv), fn ($k) => stripos($k, 'plan') !== false || stripos($k, 'speed') !== false || stripos($k, 'defer') !== false);
+        echo '   campos de plan: ' . implode(', ', $otros) . "\n";
     }
 }
 
