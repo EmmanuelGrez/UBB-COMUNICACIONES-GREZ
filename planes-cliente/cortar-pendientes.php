@@ -16,6 +16,7 @@
  *   php cortar-pendientes.php --deshacer              SIMULA reactivar a todos los que cortó esta herramienta
  *   php cortar-pendientes.php --deshacer --aplicar    los reactiva
  *   php cortar-pendientes.php --deshacer=UBB-TP5DDB13 --aplicar   reactiva solo a uno (MAC o usuario PPPoE)
+ *   php cortar-pendientes.php --deshacer=UBB-A,UBB-B,AA:BB:CC:DD:EE:FF   varios, separados por coma
  *
  * Cortar = lo mismo que "Suspender" del panel: CLIENTES-DEUDORES (página de adeudo), bitácora,
  * aviso al monitoreo. Cada corte queda marcado en ubb_bitacora (accion 'pendientes') para poder deshacerlo.
@@ -119,7 +120,12 @@ $modo = $aplicar ? 'APLICAR' : 'SIMULACIÓN';
 if ($deshacer !== null) {
     $cortados = $pdo->query("SELECT mac AS quien, MAX(ip) AS ip FROM ubb_bitacora WHERE accion = 'pendientes' AND detalle LIKE 'corte%' GROUP BY mac")->fetchAll();
     if ($deshacer !== '*') {
-        $cortados = array_values(array_filter($cortados, fn ($c) => strcasecmp($c['quien'], $deshacer) === 0));
+        $pedidos = array_values(array_filter(array_map(fn ($x) => strtoupper(trim($x)), explode(',', $deshacer))));
+        $cortados = array_values(array_filter($cortados, fn ($c) => in_array(strtoupper(trim((string) $c['quien'])), $pedidos, true)));
+        $hallados = array_map(fn ($c) => strtoupper(trim((string) $c['quien'])), $cortados);
+        foreach (array_diff($pedidos, $hallados) as $falta) {
+            echo "  NO lo cortó esta herramienta (no se toca): $falta\n";
+        }
     }
     echo "$modo · deshacer cortes de PENDIENTES · " . count($cortados) . " equipo(s)\n";
     $router = $aplicar ? uispConectarRouter('10.0.1.6') : null;
