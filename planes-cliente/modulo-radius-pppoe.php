@@ -285,6 +285,14 @@ foreach ($clientesPp as &$c) {
 }
 unset($c);
 
+/* Servicio y cliente de cada cuenta según la plataforma de Jamileth (solo lectura). */
+$serviciosPp = [];
+try {
+    $serviciosPp = obtenerServiciosPppoe(obtenerPDOJamileth());
+} catch (Throwable $e) {
+    error_log('UBB RADIUS PPPoE: sin servicios de la plataforma: ' . $e->getMessage());
+}
+
 /* Cuentas PPPoE dadas de alta solo en RADIUS (IP de la red PPPoE y sin cuenta local en el router) */
 if ($pdoPp instanceof PDO) {
     try {
@@ -715,10 +723,13 @@ portalInicio('Clientes PPPoE en RADIUS', 'Usuarios PPPoE de MKR-FSL02 (' . PP_RO
                 if ($c['migrado']) $estados[] = 'migrado';
                 if ($c['por_radius']) $estados[] = 'porradius';
             ?>
-                <tr data-buscar="<?= escapar(strtolower($c['usuario'] . ' ' . $c['ip'] . ' ' . $c['mac'] . ' ' . $c['comentario'])) ?>"
+                <?php $relPp = $serviciosPp[strtolower($c['usuario'])] ?? null; ?>
+                <tr data-buscar="<?= escapar(strtolower($c['usuario'] . ' ' . $c['ip'] . ' ' . $c['mac'] . ' ' . $c['comentario'] . ' ' . ($relPp['nombre'] ?? '') . ' ' . ($relPp['servicio'] ?? ''))) ?>"
                     data-estado="<?= escapar(implode(' ', $estados)) ?>" data-plan="<?= escapar($c['plan']) ?>">
                     <td data-t="IP" class="mono"><?= escapar($c['ip']) ?></td>
                     <td data-t="Usuario"><b><?= escapar($c['usuario']) ?></b>
+                        <?php if ($relPp): ?><small class="bloque"><?= escapar($relPp['nombre']) ?> · <b>Servicio <?= escapar($relPp['servicio']) ?></b></small>
+                        <?php else: ?><small class="bloque tenue">— sin relación —</small><?php endif; ?>
                         <?php if ($c['comentario'] !== ''): ?><br><small><?= escapar($c['comentario']) ?></small><?php endif; ?></td>
                     <td data-t="Plan"><?= escapar($c['plan']) ?><br><small class="mono"><?= escapar($c['perfil']) ?></small></td>
                     <td data-t="Conexión">
